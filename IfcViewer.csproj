@@ -17,9 +17,6 @@
   </PropertyGroup>
   <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
     <BaseOutputPath>C:\Users\mibil\OneDrive\Desktop\DevDlls\IfcViewer\2026</BaseOutputPath>
-    <!-- Use a separate FodyWeavers file for net8 that omits the net47-only xBIM assemblies
-         which Costura cannot embed (Xbim.IO.Esent, Xbim.ModelGeometry.Scene, etc.) -->
-    <ProjectWeaverXml>$(ProjectDir)FodyWeavers.net8.xml</ProjectWeaverXml>
   </PropertyGroup>
 
   <!-- Named build configurations for each Revit version -->
@@ -101,6 +98,25 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.Geometry.Engine.Interop.dll</Link>
     </None>
     <!-- ManagedEsent (Esent.Interop) — net40 build is .NET Framework but loads fine at runtime -->
+    <None Include="$(NuGetPackageRoot)managedesent\1.9.4\lib\net40\Esent.Interop.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Esent.Interop.dll</Link>
+    </None>
+  </ItemGroup>
+
+  <!-- Force-copy net47/net40-only xBIM assemblies for net48 as well.
+       These are NOT embedded by Costura (removed from IncludeAssemblies to keep
+       FodyWeavers.xml valid for both TFs). They land as loose DLLs next to
+       IfcViewer.dll and are loaded by App.OnAssemblyResolve at runtime. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <None Include="$(NuGetPackageRoot)xbim.io.esent\5.1.289\lib\net47\Xbim.IO.Esent.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.IO.Esent.dll</Link>
+    </None>
+    <None Include="$(NuGetPackageRoot)xbim.modelgeometry.scene\5.1.288\lib\net47\Xbim.ModelGeometry.Scene.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.ModelGeometry.Scene.dll</Link>
+    </None>
+    <None Include="$(NuGetPackageRoot)xbim.geometry.engine.interop\5.1.288\lib\net47\Xbim.Geometry.Engine.Interop.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.Geometry.Engine.Interop.dll</Link>
+    </None>
     <None Include="$(NuGetPackageRoot)managedesent\1.9.4\lib\net40\Esent.Interop.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Esent.Interop.dll</Link>
     </None>

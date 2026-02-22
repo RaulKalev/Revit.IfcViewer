@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Windows.Threading;
 using Xbim.Common;
 using Xbim.Common.Geometry;
 using Xbim.Ifc;
@@ -44,14 +45,16 @@ namespace IfcViewer.Ifc
 
         /// <summary>
         /// Opens and tessellates <paramref name="filePath"/> on a background thread.
-        /// Returns an <see cref="IfcModel"/> whose <c>SceneGroup</c> is populated but
-        /// not yet attached to the live Helix scene.
+        /// WPF DependencyObjects (GroupModel3D, MeshGeometryModel3D, PhongMaterial) are
+        /// marshalled to <paramref name="uiDispatcher"/> so they are owned by the UI thread.
+        /// Returns an <see cref="IfcModel"/> whose <c>SceneGroup</c> is ready to insert
+        /// into the live Helix scene (on the UI thread).
         /// </summary>
-        public static Task<IfcModel> LoadAsync(string filePath)
-            => Task.Run(() => LoadCore(filePath));
+        public static Task<IfcModel> LoadAsync(string filePath, Dispatcher uiDispatcher)
+            => Task.Run(() => LoadCore(filePath, uiDispatcher));
 
         // ── Core loader (runs on background thread) ──────────────────────────
-        private static IfcModel LoadCore(string filePath)
+        private static IfcModel LoadCore(string filePath, Dispatcher uiDispatcher)
         {
             var fileName = System.IO.Path.GetFileName(filePath);
             SessionLogger.Info("IfcLoader: opening '" + fileName + "'");
@@ -67,12 +70,10 @@ namespace IfcViewer.Ifc
                 var colourMap = new XbimColourMap();
                 colourMap.SetProductTypeColourMap(); // seed with IFC type defaults
 
-                var sceneGroup = new GroupModel3D();
-                var allBounds  = new List<BoundingBox>();
-                int meshCount  = 0;
-                int triCount   = 0;
+                int meshCount = 0;
 
-                // Bucket geometry by colour to reduce Helix draw calls
+                // Bucket geometry by colour to reduce Helix draw calls.
+                // All work here is plain CLR types — safe on a background thread.
                 // Key = rounded RGBA, Value = (positions, normals, indices, isTransparent)
                 var buckets = new Dictionary<ColourKey, Bucket>();
 
@@ -124,54 +125,65 @@ namespace IfcViewer.Ifc
                     meshCount++;
                 }
 
-                // Build one MeshGeometryModel3D per colour bucket
-                foreach (KeyValuePair<ColourKey, Bucket> kv in buckets)
-                {
-                    ColourKey key    = kv.Key;
-                    Bucket    bucket = kv.Value;
-
-                    if (bucket.Indices.Count == 0) continue;
-
-                    var helixGeom = new MeshGeometry3D
-                    {
-                        Positions = new Vector3Collection(bucket.Positions),
-                        Normals   = new Vector3Collection(bucket.Normals),
-                        Indices   = new IntCollection(bucket.Indices)
-                    };
-
-                    var mat = new PhongMaterial
-                    {
-                        DiffuseColor      = key.ToColor4(),
-                        SpecularColor     = new Color4(0.15f, 0.15f, 0.15f, 1f),
-                        SpecularShininess = 12f,
-                    };
-
-                    var mesh3d = new MeshGeometryModel3D
-                    {
-                        Geometry      = helixGeom,
-                        Material      = mat,
-                        IsTransparent = bucket.IsTransparent,
-                    };
-
-                    sceneGroup.Children.Add(mesh3d);
-                    triCount += bucket.Indices.Count / 3;
-
-                    if (bucket.Positions.Count > 0)
-                    {
-                        BoundingBox.FromPoints(bucket.Positions.ToArray(), out BoundingBox b);
-                        allBounds.Add(b);
-                    }
-                }
-
-                BoundingBox bounds = allBounds.Count > 0
-                    ? allBounds.Aggregate(BoundingBox.Merge)
-                    : new BoundingBox();
-
                 sw.Stop();
-                SessionLogger.Info("IfcLoader: " + meshCount + " elements, " +
-                                   triCount + " triangles in " + sw.ElapsedMilliseconds + " ms.");
+                SessionLogger.Info("IfcLoader: xBIM tessellation done — " + meshCount +
+                                   " instances in " + sw.ElapsedMilliseconds + " ms." +
+                                   " Building Helix scene on UI thread…");
 
-                return new IfcModel(filePath, sceneGroup, bounds, meshCount, triCount);
+                // ── Build WPF/Helix objects on the UI thread ─────────────────
+                // GroupModel3D, MeshGeometryModel3D and PhongMaterial are all
+                // DependencyObjects and must be created/owned by the UI thread.
+                return uiDispatcher.Invoke(() =>
+                {
+                    var sceneGroup = new GroupModel3D();
+                    var allBounds  = new List<BoundingBox>();
+                    int triCount   = 0;
+
+                    foreach (KeyValuePair<ColourKey, Bucket> kv in buckets)
+                    {
+                        ColourKey key    = kv.Key;
+                        Bucket    bucket = kv.Value;
+
+                        if (bucket.Indices.Count == 0) continue;
+
+                        var helixGeom = new MeshGeometry3D
+                        {
+                            Positions = new Vector3Collection(bucket.Positions),
+                            Normals   = new Vector3Collection(bucket.Normals),
+                            Indices   = new IntCollection(bucket.Indices)
+                        };
+
+                        var mat = new PhongMaterial
+                        {
+                            DiffuseColor      = key.ToColor4(),
+                            SpecularColor     = new Color4(0.15f, 0.15f, 0.15f, 1f),
+                            SpecularShininess = 12f,
+                        };
+
+                        var mesh3d = new MeshGeometryModel3D
+                        {
+                            Geometry      = helixGeom,
+                            Material      = mat,
+                            IsTransparent = bucket.IsTransparent,
+                        };
+
+                        sceneGroup.Children.Add(mesh3d);
+                        triCount += bucket.Indices.Count / 3;
+
+                        if (bucket.Positions.Count > 0)
+                        {
+                            BoundingBox.FromPoints(bucket.Positions.ToArray(), out BoundingBox b);
+                            allBounds.Add(b);
+                        }
+                    }
+
+                    BoundingBox bounds = allBounds.Count > 0
+                        ? allBounds.Aggregate(BoundingBox.Merge)
+                        : new BoundingBox();
+
+                    SessionLogger.Info("IfcLoader: " + triCount + " triangles — scene ready.");
+                    return new IfcModel(filePath, sceneGroup, bounds, meshCount, triCount);
+                });
             }
         }
 

@@ -183,7 +183,7 @@ namespace IfcViewer.UI
 
                 try
                 {
-                    IfcModel ifcModel = await IfcLoader.LoadAsync(path);
+                    IfcModel ifcModel = await IfcLoader.LoadAsync(path, Dispatcher);
 
                     // Attach to scene on UI thread
                     _viewerHost.IfcRoot.Children.Add(ifcModel.SceneGroup);

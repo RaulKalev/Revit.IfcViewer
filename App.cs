@@ -18,7 +18,10 @@ namespace IfcViewer
         public Result OnStartup(UIControlledApplication application)
         {
             // ── 1. Register assembly resolver FIRST, before anything Helix-related ──
-            _assemblyDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+            // Use typeof(App).Assembly.Location — always the real on-disk path even when
+            // Costura's CreateTemporaryAssemblies shadow-copies the executing assembly to a
+            // temp folder, which would make GetExecutingAssembly().Location wrong.
+            _assemblyDir = Path.GetDirectoryName(typeof(App).Assembly.Location);
             AppDomain.CurrentDomain.AssemblyResolve += OnAssemblyResolve;
             SessionLogger.Info($"IfcViewer starting. Assembly dir: {_assemblyDir}");
 
@@ -55,7 +58,7 @@ namespace IfcViewer
         {
             try
             {
-                // args.Name is like "HelixToolkit.Wpf.SharpDX, Version=2.25.0.0, ..."
+                // args.Name is like "Xbim.Ifc, Version=5.1.0.0, ..."
                 var simpleName = new AssemblyName(args.Name).Name;
 
                 // 1. Already loaded? Return it to avoid duplicates.
@@ -65,12 +68,23 @@ namespace IfcViewer
                         return loaded;
                 }
 
-                // 2. Look for a matching DLL next to IfcViewer.dll
+                // 2. Look for a matching DLL next to IfcViewer.dll (flat)
                 var candidate = Path.Combine(_assemblyDir, simpleName + ".dll");
                 if (File.Exists(candidate))
                 {
-                    SessionLogger.Info($"AssemblyResolve: loading '{simpleName}' from '{candidate}'");
+                    SessionLogger.Info($"AssemblyResolve: loading '{simpleName}' from flat dir");
                     return Assembly.LoadFrom(candidate);
+                }
+
+                // 3. Also probe one level of subdirectories (some NuGet packages use subfolders)
+                foreach (var subDir in Directory.GetDirectories(_assemblyDir))
+                {
+                    candidate = Path.Combine(subDir, simpleName + ".dll");
+                    if (File.Exists(candidate))
+                    {
+                        SessionLogger.Info($"AssemblyResolve: loading '{simpleName}' from subdir");
+                        return Assembly.LoadFrom(candidate);
+                    }
                 }
 
                 SessionLogger.Warn($"AssemblyResolve: '{simpleName}' not found in '{_assemblyDir}'");

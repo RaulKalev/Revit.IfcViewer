@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Weavers xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="FodyWeavers.xsd">
-	<Costura CreateTemporaryAssemblies='true'>
+	<Costura CreateTemporaryAssemblies='false'>
 		<!-- Helix + SharpDX are now safe to embed because no Helix types
 		     appear in XAML — Viewport3DX is created entirely in code-behind
 		     after Costura's resolver is already in place.

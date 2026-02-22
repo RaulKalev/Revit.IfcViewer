@@ -17,6 +17,9 @@
   </PropertyGroup>
   <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
     <BaseOutputPath>C:\Users\mibil\OneDrive\Desktop\DevDlls\IfcViewer\2026</BaseOutputPath>
+    <!-- Use a separate FodyWeavers file for net8 that omits the net47-only xBIM assemblies
+         which Costura cannot embed (Xbim.IO.Esent, Xbim.ModelGeometry.Scene, etc.) -->
+    <ProjectWeaverXml>$(ProjectDir)FodyWeavers.net8.xml</ProjectWeaverXml>
   </PropertyGroup>
 
   <!-- Named build configurations for each Revit version -->
@@ -59,6 +62,47 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
       <Link>HelixToolkit.SharpDX.Core.dll</Link>
+    </None>
+  </ItemGroup>
+
+  <!-- Force-copy xBIM managed DLLs for net8.0-windows.
+       The SDK selects netstandard2.0/net47 TFMs for these packages but does not
+       copy them automatically for the net8 target. Costura cannot embed them
+       either (they are not in net8's direct reference closure).
+       We copy them as loose files; OnAssemblyResolve picks them up at runtime. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
+    <!-- netstandard2.0 flavours -->
+    <None Include="$(NuGetPackageRoot)xbim.common\5.1.289\lib\netstandard2.0\Xbim.Common.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.Common.dll</Link>
+    </None>
+    <None Include="$(NuGetPackageRoot)xbim.ifc\5.1.289\lib\netstandard2.0\Xbim.Ifc.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.Ifc.dll</Link>
+    </None>
+    <None Include="$(NuGetPackageRoot)xbim.ifc2x3\5.1.289\lib\netstandard2.0\Xbim.Ifc2x3.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.Ifc2x3.dll</Link>
+    </None>
+    <None Include="$(NuGetPackageRoot)xbim.ifc4\5.1.289\lib\netstandard2.0\Xbim.Ifc4.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.Ifc4.dll</Link>
+    </None>
+    <None Include="$(NuGetPackageRoot)xbim.io.memorymodel\5.1.289\lib\netstandard2.0\Xbim.IO.MemoryModel.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.IO.MemoryModel.dll</Link>
+    </None>
+    <None Include="$(NuGetPackageRoot)xbim.tessellator\5.1.289\lib\netstandard2.0\Xbim.Tessellator.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.Tessellator.dll</Link>
+    </None>
+    <!-- net47 flavours (no netstandard2.0 build available) -->
+    <None Include="$(NuGetPackageRoot)xbim.io.esent\5.1.289\lib\net47\Xbim.IO.Esent.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.IO.Esent.dll</Link>
+    </None>
+    <None Include="$(NuGetPackageRoot)xbim.modelgeometry.scene\5.1.288\lib\net47\Xbim.ModelGeometry.Scene.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.ModelGeometry.Scene.dll</Link>
+    </None>
+    <None Include="$(NuGetPackageRoot)xbim.geometry.engine.interop\5.1.288\lib\net47\Xbim.Geometry.Engine.Interop.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.Geometry.Engine.Interop.dll</Link>
+    </None>
+    <!-- ManagedEsent (Esent.Interop) — net40 build is .NET Framework but loads fine at runtime -->
+    <None Include="$(NuGetPackageRoot)managedesent\1.9.4\lib\net40\Esent.Interop.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Esent.Interop.dll</Link>
     </None>
   </ItemGroup>
 

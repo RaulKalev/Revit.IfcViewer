@@ -18,18 +18,12 @@ namespace IfcViewer
         public Result OnStartup(UIControlledApplication application)
         {
             // ── 1. Register assembly resolver FIRST, before anything Helix-related ──
-            // ricaun.AppLoader shadow-copies IfcViewer.dll to a temp folder, so both
-            // Assembly.GetExecutingAssembly().Location and typeof(App).Assembly.Location
-            // return the temp path — not the real deploy folder where the loose xBIM/
-            // Helix DLLs live.
-            // CodeBase is a file:// URI that always points to the ORIGINAL on-disk location
-            // regardless of shadow-copying.
-            var codeBase = typeof(App).Assembly.CodeBase                    // file:///C:/...
-                        ?? Assembly.GetExecutingAssembly().CodeBase;
-            var codeBaseUri  = new Uri(codeBase);
-            var realLocation = Uri.UnescapeDataString(codeBaseUri.AbsolutePath)
-                                  .Replace('/', Path.DirectorySeparatorChar);
-            _assemblyDir = Path.GetDirectoryName(realLocation);
+            // ricaun.AppLoader shadow-copies IfcViewer.dll (and the entire net8.0-windows
+            // subfolder) to a temp location.  Assembly.Location returns that temp path,
+            // which is exactly where our force-copied loose DLLs (xBIM, HelixToolkit.SharpDX.Core)
+            // also end up — so we just use Location directly.
+            _assemblyDir = Path.GetDirectoryName(typeof(App).Assembly.Location)
+                        ?? Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
             AppDomain.CurrentDomain.AssemblyResolve += OnAssemblyResolve;
             SessionLogger.Info($"IfcViewer starting. Assembly dir: {_assemblyDir}");
 

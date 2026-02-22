@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Weavers xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="FodyWeavers.xsd">
 	<Costura CreateTemporaryAssemblies='false'>
-		<!-- All managed dependencies embedded so ricaun.AppLoader shadow-copying
-		     never matters — everything is inside IfcViewer.dll.
-		     Unmanaged DLLs (Xbim.Geometry.Engine32/64, native SharpDX) are left
-		     as loose files and resolved by App.OnAssemblyResolve at runtime.
-		     HelixToolkit.SharpDX.Core is netstandard2.0-only and not reachable
-		     via the reference graph for net48, so it also stays loose. -->
+		<!-- net8.0-windows embed list.
+		     Xbim.IO.Esent, Xbim.ModelGeometry.Scene, Xbim.Geometry.Engine.Interop
+		     and Esent.Interop are NOT embedded — they only ship net47/net40 builds
+		     and are not in net8's reference closure.  They are force-copied as loose
+		     files via <None> items in the csproj and loaded at runtime by
+		     App.OnAssemblyResolve. -->
 		<IncludeAssemblies>
 			MaterialDesignThemes.Wpf
 			MaterialDesignColors
@@ -27,12 +27,8 @@
 			Xbim.Ifc
 			Xbim.Ifc2x3
 			Xbim.Ifc4
-			Xbim.IO.Esent
 			Xbim.IO.MemoryModel
-			Xbim.ModelGeometry.Scene
 			Xbim.Tessellator
-			Xbim.Geometry.Engine.Interop
-			Esent.Interop
 		</IncludeAssemblies>
 		<Unmanaged32Assemblies />
 		<Unmanaged64Assemblies />
@@ -50,16 +46,12 @@
 			HelixToolkit
 			HelixToolkit.Wpf.SharpDX
 			Cyotek.Drawing.BitmapFont
-			Esent.Interop
 			Xbim.Common
 			Xbim.Ifc2x3
 			Xbim.Ifc4
 			Xbim.Ifc
-			Xbim.IO.Esent
 			Xbim.IO.MemoryModel
 			Xbim.Tessellator
-			Xbim.Geometry.Engine.Interop
-			Xbim.ModelGeometry.Scene
 		</PreloadOrder>
 	</Costura>
 </Weavers>

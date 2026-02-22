@@ -62,7 +62,14 @@ namespace IfcViewer.UI
                     MSAA                  = MSAALevel.Four,
                     Background            = new System.Windows.Media.SolidColorBrush(
                                                System.Windows.Media.Color.FromRgb(26, 26, 26)),
-                    FXAALevel             = FXAALevel.Low
+                    FXAALevel             = FXAALevel.Low,
+                    // Camera controller needs focus to receive mouse/keyboard input
+                    Focusable             = true,
+                    IsTabStop             = true,
+                    // Zoom around the point under the cursor
+                    ZoomAroundMouseDownPoint = true,
+                    // Inspect mode: left=rotate, middle=pan, right-drag/scroll=zoom
+                    CameraMode            = CameraMode.Inspect,
                 };
 
                 // 3. Scene root
@@ -70,6 +77,9 @@ namespace IfcViewer.UI
                 _viewport.Items.Add(_sceneRoot);
 
                 // 4. Insert viewport as first child of ViewportContainer (behind the status bar)
+                // Give keyboard focus to the viewport on any mouse button press so the
+                // Helix CameraController receives mouse-delta events for pan/zoom/rotate.
+                _viewport.MouseDown += (s, ev) => _viewport.Focus();
                 ViewportContainer.Children.Insert(0, _viewport);
 
                 // 5. Build test scene

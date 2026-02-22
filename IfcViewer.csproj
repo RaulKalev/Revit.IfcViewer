@@ -39,11 +39,26 @@
     <PackageReference Include="Costura.Fody" Version="6.0.0">
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
-    <PackageReference Include="HelixToolkit.Wpf.SharpDX" Version="2.25.0" />
+    <!-- HelixToolkit: Private=True so all deps copy to output folder -->
+    <PackageReference Include="HelixToolkit.Wpf.SharpDX" Version="2.25.0">
+      <IncludeAssets>all</IncludeAssets>
+      <ExcludeAssets>none</ExcludeAssets>
+    </PackageReference>
     <PackageReference Include="MaterialDesignColors" Version="5.2.1" />
     <PackageReference Include="MaterialDesignThemes" Version="5.2.1" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="ricaun.Revit.UI" Version="0.7.1" />
+  </ItemGroup>
+
+  <!-- Force-copy HelixToolkit.SharpDX.Core (netstandard2.0) to output.
+       It doesn't auto-copy for net48 targets. -->
+  <ItemGroup>
+    <None Include="$(NuGetPackageRoot)helixtoolkit.sharpdx.core\2.25.0\lib\netstandard2.0\HelixToolkit.SharpDX.Core.dll"
+          Condition="Exists('$(NuGetPackageRoot)helixtoolkit.sharpdx.core\2.25.0\lib\netstandard2.0\HelixToolkit.SharpDX.Core.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+      <Link>HelixToolkit.SharpDX.Core.dll</Link>
+    </None>
   </ItemGroup>
 
   <!-- Revit 2024 (NET 4.8) -->

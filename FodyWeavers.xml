@@ -1,22 +1,14 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Weavers xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="FodyWeavers.xsd">
 	<Costura CreateTemporaryAssemblies='true'>
+		<!-- Helix + SharpDX are NOT embedded — they ship as loose DLLs
+		     next to IfcViewer.dll and are resolved by App.OnAssemblyResolve. -->
 		<IncludeAssemblies>
 			MaterialDesignThemes.Wpf
 			MaterialDesignColors
 			Newtonsoft.Json
 			Microsoft.Xaml.Behaviors
 			ricaun.Revit.UI.0.7.1
-			HelixToolkit
-			HelixToolkit.Core.SharpDX
-			HelixToolkit.Wpf.SharpDX
-			SharpDX
-			SharpDX.D3DCompiler
-			SharpDX.Direct2D1
-			SharpDX.Direct3D11
-			SharpDX.Direct3D9
-			SharpDX.DXGI
-			SharpDX.Mathematics
 		</IncludeAssemblies>
 		<Unmanaged32Assemblies />
 		<Unmanaged64Assemblies />

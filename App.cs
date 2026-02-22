@@ -18,10 +18,18 @@ namespace IfcViewer
         public Result OnStartup(UIControlledApplication application)
         {
             // ── 1. Register assembly resolver FIRST, before anything Helix-related ──
-            // Use typeof(App).Assembly.Location — always the real on-disk path even when
-            // Costura's CreateTemporaryAssemblies shadow-copies the executing assembly to a
-            // temp folder, which would make GetExecutingAssembly().Location wrong.
-            _assemblyDir = Path.GetDirectoryName(typeof(App).Assembly.Location);
+            // ricaun.AppLoader shadow-copies IfcViewer.dll to a temp folder, so both
+            // Assembly.GetExecutingAssembly().Location and typeof(App).Assembly.Location
+            // return the temp path — not the real deploy folder where the loose xBIM/
+            // Helix DLLs live.
+            // CodeBase is a file:// URI that always points to the ORIGINAL on-disk location
+            // regardless of shadow-copying.
+            var codeBase = typeof(App).Assembly.CodeBase                    // file:///C:/...
+                        ?? Assembly.GetExecutingAssembly().CodeBase;
+            var codeBaseUri  = new Uri(codeBase);
+            var realLocation = Uri.UnescapeDataString(codeBaseUri.AbsolutePath)
+                                  .Replace('/', Path.DirectorySeparatorChar);
+            _assemblyDir = Path.GetDirectoryName(realLocation);
             AppDomain.CurrentDomain.AssemblyResolve += OnAssemblyResolve;
             SessionLogger.Info($"IfcViewer starting. Assembly dir: {_assemblyDir}");
 

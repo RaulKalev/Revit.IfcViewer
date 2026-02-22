@@ -189,12 +189,11 @@
 
                             <!-- Panel header -->
                             <TextBlock Grid.Row="0"
-                                       Text="Loaded Models"
+                                       Text="LOADED MODELS"
                                        FontSize="11"
                                        FontWeight="SemiBold"
                                        Foreground="{DynamicResource IconBrush}"
-                                       Margin="8,8,8,4"
-                                       TextTransform="Uppercase"/>
+                                       Margin="8,8,8,4"/>
 
                             <!-- IFC / Revit model list -->
                             <ListBox x:Name="ModelListBox"

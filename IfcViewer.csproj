@@ -79,13 +79,37 @@
     </Reference>
   </ItemGroup>
 
+  <!-- Exclude legacy ProSchedules template files that are not part of IfcViewer -->
+  <ItemGroup>
+    <Compile Remove="Commands\ProSheetsCommand.cs" />
+    <Compile Remove="ExternalEvents\**" />
+    <Compile Remove="Models\**" />
+    <Compile Remove="Services\**" />
+    <Compile Remove="UI\DuplicateSheetsWindow.xaml.cs" />
+    <Compile Remove="UI\RenameWindow.xaml.cs" />
+    <Compile Remove="UI\ParametersWindow.xaml.cs" />
+    <Compile Remove="UI\SortingWindow.xaml.cs" />
+    <Compile Remove="UI\ChangelogWindow.xaml.cs" />
+    <Compile Remove="UI\WindowResizer.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Page Remove="UI\DuplicateSheetsWindow.xaml" />
+    <Page Remove="UI\RenameWindow.xaml" />
+    <Page Remove="UI\ParametersWindow.xaml" />
+    <Page Remove="UI\SortingWindow.xaml" />
+    <Page Remove="UI\ChangelogWindow.xaml" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Remove="Assets\ProSchedules.tiff" />
+  </ItemGroup>
+
   <ItemGroup>
     <Compile Update="UI\TitleBar.xaml.cs">
       <SubType>Code</SubType>
     </Compile>
   </ItemGroup>
 
-  <Target Name="SignBuild" AfterTargets="Build" Condition="'$(Configuration)' == 'Release2024' OR '$(Configuration)' == 'Release2026' AND '$(TargetPath)' != ''">
+  <Target Name="SignBuild" AfterTargets="Build" Condition="('$(Configuration)' == 'Release2024' OR '$(Configuration)' == 'Release2026') AND '$(TargetPath)' != ''">
     <Exec Command="&quot;C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe&quot; sign /f &quot;C:\Users\mibil\OneDrive\Desktop\RKToolsCert.pfx&quot; /p &quot;RaulKalev&quot; /tr http://timestamp.digicert.com /td SHA256 /fd SHA256 &quot;$(TargetPath)&quot;" />
   </Target>
 

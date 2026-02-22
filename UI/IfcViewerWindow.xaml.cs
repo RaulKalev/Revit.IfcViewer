@@ -8,9 +8,16 @@ using System.Windows.Input;
 
 namespace IfcViewer.UI
 {
+    /// <summary>
+    /// Main modeless viewer window.
+    /// NOTE: No Helix types appear in the XAML — Viewport3DX is created
+    /// entirely in code after App.OnStartup has registered the assembly resolver.
+    /// This prevents the XAML parser from triggering a Helix assembly load
+    /// before the resolver hook is in place.
+    /// </summary>
     public partial class IfcViewerWindow : Window
     {
-        // ── P/Invoke for manual window resizing ──────────────────────────────
+        // ── P/Invoke for window resizing ──────────────────────────────────────
         [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wp, IntPtr lp);
         [DllImport("user32.dll")] private static extern bool ReleaseCapture();
 
@@ -21,76 +28,81 @@ namespace IfcViewer.UI
         private const int HTBOTTOMLEFT     = 16;
         private const int HTBOTTOMRIGHT    = 17;
 
-        // ── Helix bindings (exposed as DPs for XAML binding) ─────────────────
-        public static readonly DependencyProperty EffectsManagerProperty =
-            DependencyProperty.Register(nameof(EffectsManager), typeof(EffectsManager), typeof(IfcViewerWindow));
-
-        public static readonly DependencyProperty CameraProperty =
-            DependencyProperty.Register(nameof(Camera), typeof(Camera), typeof(IfcViewerWindow));
-
-        public EffectsManager EffectsManager
-        {
-            get => (EffectsManager)GetValue(EffectsManagerProperty);
-            set => SetValue(EffectsManagerProperty, value);
-        }
-
-        public Camera Camera
-        {
-            get => (Camera)GetValue(CameraProperty);
-            set => SetValue(CameraProperty, value);
-        }
-
         // ── State ─────────────────────────────────────────────────────────────
         private readonly UIApplication _uiApp;
-        private readonly ViewerHost    _viewerHost;
+        private ViewerHost   _viewerHost;
+        private Viewport3DX  _viewport;
+        private GroupModel3D _sceneRoot;
         private bool _isDarkTheme = true;
-
-        // Scene root that Viewport3DX will render
-        private readonly GroupModel3D _sceneRoot = new GroupModel3D();
 
         // ── Constructor ───────────────────────────────────────────────────────
         public IfcViewerWindow(UIApplication uiApp)
         {
             _uiApp = uiApp;
-
-            // Create the GPU resource host first so DPs are set before InitializeComponent
-            _viewerHost = new ViewerHost();
-            EffectsManager = _viewerHost.EffectsManager;
-            Camera         = _viewerHost.Camera;
-
             InitializeComponent();
-
-            // Add the scene root to the viewport after the XAML tree is built
             Loaded += OnWindowLoaded;
         }
 
-        // ── Loaded ────────────────────────────────────────────────────────────
+        // ── Loaded: create Viewport3DX in code AFTER resolver is registered ──
         private void OnWindowLoaded(object sender, RoutedEventArgs e)
         {
-            // Attach the scene root
-            Viewport.Items.Add(_sceneRoot);
+            try
+            {
+                // 1. Create the ViewerHost (EffectsManager + Camera)
+                _viewerHost = new ViewerHost();
 
-            // Build the test scene (lights + grid + axis + cube)
-            _viewerHost.BuildTestScene(_sceneRoot);
+                // 2. Create Viewport3DX entirely in code — no XAML reference
+                _viewport = new Viewport3DX
+                {
+                    EffectsManager        = _viewerHost.EffectsManager,
+                    Camera                = _viewerHost.Camera,
+                    ShowCoordinateSystem  = false,
+                    ShowFrameRate         = true,
+                    EnableSSAO            = false,
+                    MSAA                  = MSAALevel.Four,
+                    Background            = new System.Windows.Media.SolidColorBrush(
+                                               System.Windows.Media.Color.FromRgb(26, 26, 26)),
+                    FXAALevel             = FXAALevel.Low
+                };
 
-            UpdateStatus($"Triangles: {CountTriangles()}  |  GPU Viewport Active");
-            SessionLogger.Info("IfcViewerWindow loaded — test scene rendered.");
+                // 3. Scene root
+                _sceneRoot = new GroupModel3D();
+                _viewport.Items.Add(_sceneRoot);
+
+                // 4. Insert viewport as first child of ViewportContainer (behind the status bar)
+                ViewportContainer.Children.Insert(0, _viewport);
+
+                // 5. Build test scene
+                _viewerHost.BuildTestScene(_sceneRoot);
+
+                UpdateStatus($"GPU Viewport Active  |  Triangles: {CountTriangles()}");
+                SessionLogger.Info("Viewport3DX created in code-behind — test scene rendered.");
+            }
+            catch (Exception ex)
+            {
+                SessionLogger.Error("Failed to initialize Helix viewport.", ex);
+                UpdateStatus($"Viewport error: {ex.Message}");
+            }
         }
 
-        // ── Window close → dispose DirectX resources ──────────────────────────
+        // ── Close: dispose DirectX resources ─────────────────────────────────
         private void Window_Closed(object sender, EventArgs e)
         {
-            // Clear scene items before disposing to avoid use-after-free
-            _sceneRoot.Children.Clear();
-            Viewport.Items.Clear();
-            _viewerHost.Dispose();
+            try
+            {
+                _sceneRoot?.Children.Clear();
+                _viewport?.Items.Clear();
+                _viewerHost?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                SessionLogger.Error("Error during viewport disposal.", ex);
+            }
         }
 
-        // ── Title-bar drag ────────────────────────────────────────────────────
+        // ── Title-bar ─────────────────────────────────────────────────────────
         private void TitleBar_Loaded(object sender, RoutedEventArgs e) { }
-
         private void Window_MouseMove(object sender, MouseEventArgs e) { }
-
         private void Window_PreviewMouseDown(object sender, MouseButtonEventArgs e) { }
 
         // ── Theme toggle ──────────────────────────────────────────────────────
@@ -102,42 +114,26 @@ namespace IfcViewer.UI
 
         // ── Toolbar ───────────────────────────────────────────────────────────
         private void AddIfc_Click(object sender, RoutedEventArgs e)
-        {
-            // Implemented in Stage 2.
-            SessionLogger.Info("AddIfc clicked (Stage 2 placeholder).");
-        }
+            => SessionLogger.Info("AddIfc clicked (Stage 2 placeholder).");
 
         private void RemoveIfc_Click(object sender, RoutedEventArgs e)
-        {
-            // Implemented in Stage 2.
-            SessionLogger.Info("RemoveIfc clicked (Stage 2 placeholder).");
-        }
+            => SessionLogger.Info("RemoveIfc clicked (Stage 2 placeholder).");
 
         private void SyncRevit_Click(object sender, RoutedEventArgs e)
-        {
-            // Implemented in Stage 3.
-            SessionLogger.Info("SyncRevit clicked (Stage 3 placeholder).");
-        }
+            => SessionLogger.Info("SyncRevit clicked (Stage 3 placeholder).");
 
         private void ResetCamera_Click(object sender, RoutedEventArgs e)
-        {
-            _viewerHost.ResetCamera();
-        }
+            => _viewerHost?.ResetCamera();
 
         private void Wireframe_Checked(object sender, RoutedEventArgs e)
-        {
-            ApplyWireframe(true);
-        }
+            => ApplyWireframe(true);
 
         private void Wireframe_Unchecked(object sender, RoutedEventArgs e)
-        {
-            ApplyWireframe(false);
-        }
+            => ApplyWireframe(false);
 
-        /// <summary>Walk scene and toggle wireframe on all MeshGeometryModel3D nodes.</summary>
         private void ApplyWireframe(bool on)
         {
-            ApplyWireframeToGroup(_sceneRoot, on);
+            if (_sceneRoot != null) ApplyWireframeToGroup(_sceneRoot, on);
             SessionLogger.Info($"Wireframe {(on ? "on" : "off")}.");
         }
 
@@ -155,14 +151,12 @@ namespace IfcViewer.UI
         // ── Opacity sliders ───────────────────────────────────────────────────
         private void IfcOpacity_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
-            // Applied to IfcRoot in Stage 2
             if (_viewerHost == null) return;
             SetGroupOpacity(_viewerHost.IfcRoot, e.NewValue);
         }
 
         private void RevitOpacity_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
-            // Applied to RevitRoot in Stage 3
             if (_viewerHost == null) return;
             SetGroupOpacity(_viewerHost.RevitRoot, e.NewValue);
         }
@@ -181,17 +175,18 @@ namespace IfcViewer.UI
             }
         }
 
-        // ── Status helper ──────────────────────────────────────────────────────
+        // ── Status / helpers ──────────────────────────────────────────────────
         public void UpdateStatus(string text)
         {
             if (StatusBar != null)
                 StatusBar.Text = text;
         }
 
+        public ViewerHost ViewerHost => _viewerHost;
+        public GroupModel3D SceneRoot => _sceneRoot;
+
         private int CountTriangles()
-        {
-            return CountTrianglesInGroup(_sceneRoot);
-        }
+            => _sceneRoot != null ? CountTrianglesInGroup(_sceneRoot) : 0;
 
         private static int CountTrianglesInGroup(GroupModel3D group)
         {
@@ -206,7 +201,7 @@ namespace IfcViewer.UI
             return total;
         }
 
-        // ── Resize edge handlers ───────────────────────────────────────────────
+        // ── Resize edges ──────────────────────────────────────────────────────
         private void LeftEdge_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
             => ResizeWindow(HTLEFT);
         private void RightEdge_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)

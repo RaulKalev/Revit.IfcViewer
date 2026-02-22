@@ -5,7 +5,6 @@
     xmlns:av="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:local="clr-namespace:IfcViewer"
     xmlns:ui="clr-namespace:IfcViewer.UI"
-    xmlns:hx="clr-namespace:HelixToolkit.Wpf.SharpDX;assembly=HelixToolkit.Wpf.SharpDX"
     xmlns:materialDesign="http://materialdesigninxaml.net/winfx/xaml/themes"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     Title="IFC Viewer"
@@ -158,7 +157,7 @@
                     </StackPanel>
                 </Border>
 
-                <!-- ── Main layout: left panel + splitter + viewport ── -->
+                <!-- ── Main layout ── -->
                 <Grid Grid.Row="2">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="200" MinWidth="150" MaxWidth="350"/>
@@ -216,20 +215,10 @@
                                   Background="{DynamicResource BorderBrush}"
                                   ShowsPreview="False"/>
 
-                    <!-- GPU Viewport -->
-                    <Grid Grid.Column="2" x:Name="ViewportContainer" ClipToBounds="True">
-
-                        <hx:Viewport3DX
-                            x:Name="Viewport"
-                            EffectsManager="{Binding EffectsManager, RelativeSource={RelativeSource AncestorType=Window}}"
-                            Camera="{Binding Camera, RelativeSource={RelativeSource AncestorType=Window}}"
-                            ShowCoordinateSystem="False"
-                            ShowFrameRate="True"
-                            EnableSSAO="False"
-                            MSAA="Four"
-                            Background="#FF1A1A1A"
-                            FXAALevel="Low">
-                        </hx:Viewport3DX>
+                    <!-- Viewport host — Viewport3DX injected in code-behind after
+                         assembly resolver fires; no Helix types in XAML. -->
+                    <Grid Grid.Column="2" x:Name="ViewportContainer" ClipToBounds="True"
+                          Background="#FF1A1A1A">
 
                         <!-- Status overlay -->
                         <Border HorizontalAlignment="Right"
@@ -238,9 +227,10 @@
                                 CornerRadius="4"
                                 Padding="6,2"
                                 Margin="0,0,6,6"
-                                IsHitTestVisible="False">
+                                IsHitTestVisible="False"
+                                Panel.ZIndex="10">
                             <TextBlock x:Name="StatusBar"
-                                       Text="GPU Viewport Active"
+                                       Text="Initializing GPU viewport…"
                                        Foreground="#FF70BABC"
                                        FontSize="10"/>
                         </Border>

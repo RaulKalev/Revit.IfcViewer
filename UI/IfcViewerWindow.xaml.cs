@@ -54,22 +54,23 @@ namespace IfcViewer.UI
                 // 2. Create Viewport3DX entirely in code — no XAML reference
                 _viewport = new Viewport3DX
                 {
-                    EffectsManager        = _viewerHost.EffectsManager,
-                    Camera                = _viewerHost.Camera,
-                    ShowCoordinateSystem  = false,
-                    ShowFrameRate         = true,
-                    EnableSSAO            = false,
-                    MSAA                  = MSAALevel.Four,
-                    Background            = new System.Windows.Media.SolidColorBrush(
-                                               System.Windows.Media.Color.FromRgb(26, 26, 26)),
-                    FXAALevel             = FXAALevel.Low,
+                    EffectsManager           = _viewerHost.EffectsManager,
+                    Camera                   = _viewerHost.Camera,
+                    ShowCoordinateSystem     = false,
+                    ShowFrameRate            = true,
+                    EnableSSAO               = false,
+                    MSAA                     = MSAALevel.Four,
+                    Background               = new System.Windows.Media.SolidColorBrush(
+                                                  System.Windows.Media.Color.FromRgb(26, 26, 26)),
+                    FXAALevel                = FXAALevel.Low,
                     // Camera controller needs focus to receive mouse/keyboard input
-                    Focusable             = true,
-                    IsTabStop             = true,
-                    // Zoom around the point under the cursor
+                    Focusable                = true,
+                    IsTabStop                = true,
+                    // Zoom to cursor
                     ZoomAroundMouseDownPoint = true,
-                    // Inspect mode: left=rotate, middle=pan, right-drag/scroll=zoom
-                    CameraMode            = CameraMode.Inspect,
+                    CameraMode               = CameraMode.Inspect,
+                    // Disable default bindings so we can install our own below
+                    UseDefaultGestures       = false,
                 };
 
                 // 3. Scene root
@@ -77,10 +78,33 @@ namespace IfcViewer.UI
                 _viewport.Items.Add(_sceneRoot);
 
                 // 4. Insert viewport as first child of ViewportContainer (behind the status bar)
-                // Give keyboard focus to the viewport on any mouse button press so the
-                // Helix CameraController receives mouse-delta events for pan/zoom/rotate.
+                // Give keyboard focus on any click so CameraController receives events.
                 _viewport.MouseDown += (s, ev) => _viewport.Focus();
                 ViewportContainer.Children.Insert(0, _viewport);
+
+                // 5a. Wire custom mouse bindings once the template is applied.
+                //     UseDefaultGestures=false clears Helix's built-ins; we re-add only
+                //     what we want. The bindings go on the viewport itself — the
+                //     CameraController child handles the matching RoutedCommands.
+                //     Convention: right-click drag = rotate, middle-click drag = pan,
+                //                 scroll wheel = zoom (Helix handles scroll internally).
+                _viewport.IsPanEnabled    = true;
+                _viewport.IsZoomEnabled   = true;
+
+                _viewport.Loaded += (s, ev) =>
+                {
+                    _viewport.InputBindings.Clear();
+
+                    // Right-click drag → Rotate
+                    _viewport.InputBindings.Add(new MouseBinding(
+                        ViewportCommands.Rotate,
+                        new MouseGesture(MouseAction.RightClick)));
+
+                    // Middle-click drag → Pan
+                    _viewport.InputBindings.Add(new MouseBinding(
+                        ViewportCommands.Pan,
+                        new MouseGesture(MouseAction.MiddleClick)));
+                };
 
                 // 5. Build test scene
                 _viewerHost.BuildTestScene(_sceneRoot);

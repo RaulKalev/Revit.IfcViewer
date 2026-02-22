@@ -1,7 +1,10 @@
 using Autodesk.Revit.UI;
 using HelixToolkit.Wpf.SharpDX;
+using IfcViewer.Ifc;
 using IfcViewer.Viewer;
+using Microsoft.Win32;
 using System;
+using System.Collections.ObjectModel;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Input;
@@ -34,6 +37,10 @@ namespace IfcViewer.UI
         private Viewport3DX  _viewport;
         private GroupModel3D _sceneRoot;
         private bool _isDarkTheme = true;
+
+        // Loaded IFC models — bound to ModelListBox
+        private readonly ObservableCollection<IfcModel> _loadedModels
+            = new ObservableCollection<IfcModel>();
 
         // ── Constructor ───────────────────────────────────────────────────────
         public IfcViewerWindow(UIApplication uiApp)
@@ -109,6 +116,9 @@ namespace IfcViewer.UI
                 // 5. Build test scene
                 _viewerHost.BuildTestScene(_sceneRoot);
 
+                // 6. Bind the model list
+                ModelListBox.ItemsSource = _loadedModels;
+
                 UpdateStatus($"GPU Viewport Active  |  Triangles: {CountTriangles()}");
                 SessionLogger.Info("Viewport3DX created in code-behind — test scene rendered.");
             }
@@ -147,11 +157,76 @@ namespace IfcViewer.UI
         }
 
         // ── Toolbar ───────────────────────────────────────────────────────────
-        private void AddIfc_Click(object sender, RoutedEventArgs e)
-            => SessionLogger.Info("AddIfc clicked (Stage 2 placeholder).");
+        private async void AddIfc_Click(object sender, RoutedEventArgs e)
+        {
+            var dlg = new OpenFileDialog
+            {
+                Title            = "Open IFC file(s)",
+                Filter           = "IFC Files (*.ifc)|*.ifc|All Files (*.*)|*.*",
+                Multiselect      = true,
+                CheckFileExists  = true,
+            };
+            if (dlg.ShowDialog(this) != true) return;
+
+            foreach (string path in dlg.FileNames)
+            {
+                // Guard: don't load the same file twice
+                bool alreadyLoaded = false;
+                foreach (var m in _loadedModels)
+                    if (string.Equals(m.FilePath, path, StringComparison.OrdinalIgnoreCase))
+                    { alreadyLoaded = true; break; }
+                if (alreadyLoaded) continue;
+
+                UpdateStatus("Loading: " + System.IO.Path.GetFileName(path) + " …");
+                AddIfcButton.IsEnabled    = false;
+                RemoveIfcButton.IsEnabled = false;
+
+                try
+                {
+                    IfcModel ifcModel = await IfcLoader.LoadAsync(path);
+
+                    // Attach to scene on UI thread
+                    _viewerHost.IfcRoot.Children.Add(ifcModel.SceneGroup);
+                    _loadedModels.Add(ifcModel);
+                    ModelListBox.SelectedItem = ifcModel;
+
+                    // Fit camera to the loaded geometry
+                    _viewerHost.FitView(ifcModel.Bounds);
+
+                    UpdateStatus(ifcModel.DisplayName + "  |  " +
+                                 ifcModel.MeshCount + " elements  |  " +
+                                 ifcModel.TriangleCount + " triangles");
+                    SessionLogger.Info("Loaded: " + ifcModel.DisplayName);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this,
+                        "Failed to load IFC file:\n\n" + ex.Message,
+                        "IFC Load Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                    SessionLogger.Error("IFC load failed: " + path, ex);
+                    UpdateStatus("Load failed — see log.");
+                }
+                finally
+                {
+                    AddIfcButton.IsEnabled    = true;
+                    RemoveIfcButton.IsEnabled = true;
+                }
+            }
+        }
 
         private void RemoveIfc_Click(object sender, RoutedEventArgs e)
-            => SessionLogger.Info("RemoveIfc clicked (Stage 2 placeholder).");
+        {
+            if (!(ModelListBox.SelectedItem is IfcModel selected)) return;
+
+            // Remove from scene
+            _viewerHost.IfcRoot.Children.Remove(selected.SceneGroup);
+            _loadedModels.Remove(selected);
+
+            UpdateStatus(_loadedModels.Count == 0
+                ? "GPU Viewport Active"
+                : _loadedModels.Count + " model(s) loaded");
+            SessionLogger.Info("Removed: " + selected.DisplayName);
+        }
 
         private void SyncRevit_Click(object sender, RoutedEventArgs e)
             => SessionLogger.Info("SyncRevit clicked (Stage 3 placeholder).");

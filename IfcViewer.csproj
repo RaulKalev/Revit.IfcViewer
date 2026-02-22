@@ -48,13 +48,14 @@
     <PackageReference Include="MaterialDesignThemes" Version="5.2.1" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="ricaun.Revit.UI" Version="0.7.1" />
+    <PackageReference Include="Xbim.Essentials" Version="5.1.288" />
+    <PackageReference Include="Xbim.Geometry" Version="5.1.288" />
   </ItemGroup>
 
   <!-- Force-copy HelixToolkit.SharpDX.Core (netstandard2.0) to output.
        It doesn't auto-copy for net48 targets. -->
   <ItemGroup>
-    <None Include="$(NuGetPackageRoot)helixtoolkit.sharpdx.core\2.25.0\lib\netstandard2.0\HelixToolkit.SharpDX.Core.dll"
-          Condition="Exists('$(NuGetPackageRoot)helixtoolkit.sharpdx.core\2.25.0\lib\netstandard2.0\HelixToolkit.SharpDX.Core.dll')">
+    <None Include="$(NuGetPackageRoot)helixtoolkit.sharpdx.core\2.25.0\lib\netstandard2.0\HelixToolkit.SharpDX.Core.dll" Condition="Exists('$(NuGetPackageRoot)helixtoolkit.sharpdx.core\2.25.0\lib\netstandard2.0\HelixToolkit.SharpDX.Core.dll')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
       <Link>HelixToolkit.SharpDX.Core.dll</Link>

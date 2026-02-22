@@ -1,0 +1,34 @@
+
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "IfcViewer", "IfcViewer.csproj", "{A2C4E6F8-1B3D-4A5C-9E7F-2D4B6A8C0E2A}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+		Debug2024|x64 = Debug2024|x64
+		Release2024|x64 = Release2024|x64
+		Debug2026|x64 = Debug2026|x64
+		Release2026|x64 = Release2026|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{A2C4E6F8-1B3D-4A5C-9E7F-2D4B6A8C0E2A}.Debug|x64.ActiveCfg = Debug|x64
+		{A2C4E6F8-1B3D-4A5C-9E7F-2D4B6A8C0E2A}.Debug|x64.Build.0 = Debug|x64
+		{A2C4E6F8-1B3D-4A5C-9E7F-2D4B6A8C0E2A}.Release|x64.ActiveCfg = Release|x64
+		{A2C4E6F8-1B3D-4A5C-9E7F-2D4B6A8C0E2A}.Release|x64.Build.0 = Release|x64
+		{A2C4E6F8-1B3D-4A5C-9E7F-2D4B6A8C0E2A}.Debug2024|x64.ActiveCfg = Debug2024|x64
+		{A2C4E6F8-1B3D-4A5C-9E7F-2D4B6A8C0E2A}.Debug2024|x64.Build.0 = Debug2024|x64
+		{A2C4E6F8-1B3D-4A5C-9E7F-2D4B6A8C0E2A}.Release2024|x64.ActiveCfg = Release2024|x64
+		{A2C4E6F8-1B3D-4A5C-9E7F-2D4B6A8C0E2A}.Release2024|x64.Build.0 = Release2024|x64
+		{A2C4E6F8-1B3D-4A5C-9E7F-2D4B6A8C0E2A}.Debug2026|x64.ActiveCfg = Debug2026|x64
+		{A2C4E6F8-1B3D-4A5C-9E7F-2D4B6A8C0E2A}.Debug2026|x64.Build.0 = Debug2026|x64
+		{A2C4E6F8-1B3D-4A5C-9E7F-2D4B6A8C0E2A}.Release2026|x64.ActiveCfg = Release2026|x64
+		{A2C4E6F8-1B3D-4A5C-9E7F-2D4B6A8C0E2A}.Release2026|x64.Build.0 = Release2026|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal

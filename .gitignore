@@ -1,0 +1,28 @@
+# Build outputs
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# NuGet
+packages/
+*.nupkg
+
+# Test results
+TestResults/
+
+# Rider / VS Code
+.idea/
+.vscode/
+
+# Signing certs (never commit)
+*.pfx
+*.snk
+
+# Log files
+*.log
+
+# Legacy project files (replaced by IfcViewer.csproj / IfcViewer.sln)
+ProSchedules.csproj
+ProSchedules.sln

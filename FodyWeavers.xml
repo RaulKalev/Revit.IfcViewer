@@ -7,6 +7,16 @@
 			Newtonsoft.Json
 			Microsoft.Xaml.Behaviors
 			ricaun.Revit.UI.0.7.1
+			HelixToolkit
+			HelixToolkit.Core.SharpDX
+			HelixToolkit.Wpf.SharpDX
+			SharpDX
+			SharpDX.D3DCompiler
+			SharpDX.Direct2D1
+			SharpDX.Direct3D11
+			SharpDX.Direct3D9
+			SharpDX.DXGI
+			SharpDX.Mathematics
 		</IncludeAssemblies>
 		<Unmanaged32Assemblies />
 		<Unmanaged64Assemblies />

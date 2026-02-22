@@ -151,7 +151,7 @@
                                       Unchecked="Wireframe_Unchecked"
                                       Width="32" Height="32" Margin="0,0,6,0"
                                       ToolTip="Toggle wireframe overlay"
-                                      Style="{StaticResource CustomActionButtonStyle}">
+                                      Style="{StaticResource CustomActionToggleButtonStyle}">
                             <materialDesign:PackIcon Kind="Cube" Width="20" Height="20"/>
                         </ToggleButton>
                     </StackPanel>

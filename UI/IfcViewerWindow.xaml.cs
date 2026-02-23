@@ -32,6 +32,7 @@ namespace IfcViewer.UI
         private const int HTBOTTOMLEFT     = 16;
         private const int HTBOTTOMRIGHT    = 17;
 
+
         // ── State ─────────────────────────────────────────────────────────────
         private readonly UIApplication _uiApp;
         private ViewerHost   _viewerHost;
@@ -126,26 +127,10 @@ namespace IfcViewer.UI
                         ViewportCommands.Pan,
                         new MouseGesture(MouseAction.MiddleClick)));
 
-                    // Enable VSync after the first render frame — RenderHost (and its
-                    // SwapChain) is created lazily by Helix on the first Present call,
-                    // so it is null during Loaded. A one-shot CompositionTarget.Rendering
-                    // handler fires after the first GPU frame and sets it reliably.
-                    EventHandler vsyncSetter = null;
-                    vsyncSetter = (vs, ve) =>
-                    {
-                        System.Windows.Media.CompositionTarget.Rendering -= vsyncSetter;
-                        try
-                        {
-                            var rh = _viewport.RenderHost;
-                            // Try both property names — HelixToolkit exposes VSync control
-                            // as EnableVSync (bool) and VSyncInterval (int, DXGI SyncInterval)
-                            rh?.GetType().GetProperty("EnableVSync")?.SetValue(rh, true);
-                            rh?.GetType().GetProperty("VSyncInterval")?.SetValue(rh, 1);
-                            SessionLogger.Info("VSync enabled on RenderHost.");
-                        }
-                        catch (Exception ex) { SessionLogger.Warn("VSync set failed: " + ex.Message); }
-                    };
-                    System.Windows.Media.CompositionTarget.Rendering += vsyncSetter;
+                    // Note: Viewport3DX always uses DX11ImageSourceRenderHost (WPF D3DImage
+                    // path) regardless of AllowsTransparency. This architecture has no
+                    // GPU-level VSync — tearing is a known limitation of HelixToolkit.Wpf.SharpDX
+                    // inside a WPF window. No further throttle attempts are made here.
                 };
 
                 // 5. Build test scene

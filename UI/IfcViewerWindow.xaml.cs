@@ -125,6 +125,16 @@ namespace IfcViewer.UI
                     _viewport.InputBindings.Add(new MouseBinding(
                         ViewportCommands.Pan,
                         new MouseGesture(MouseAction.MiddleClick)));
+
+                    // Enable VSync to prevent screen tearing.
+                    // SwapChainRenderHost.EnableVSync is in HelixToolkit.SharpDX.Core.
+                    // Set via reflection so we don't need a hard assembly reference.
+                    try
+                    {
+                        var rh = _viewport.RenderHost;
+                        rh?.GetType().GetProperty("EnableVSync")?.SetValue(rh, true);
+                    }
+                    catch { /* non-critical — tearing is cosmetic */ }
                 };
 
                 // 5. Build test scene

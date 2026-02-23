@@ -136,8 +136,9 @@ namespace IfcViewer.UI
                 //    mouseTarget = this Window (PreviewMouse tunnel fires before Helix)
                 _fpController = new FirstPersonController(_viewerHost.Camera, _viewport, this);
 
-                // 9. Section plane manager
+                // 9. Section plane manager + attach its visual quad to the scene root
                 _sectionMgr = new SectionPlaneManager();
+                _sectionMgr.AttachVisual(_sceneRoot);
 
                 UpdateStatus($"GPU Viewport Active  |  Triangles: {CountTriangles()}");
                 SessionLogger.Info("Viewport3DX created in code-behind — test scene rendered.");
@@ -155,6 +156,7 @@ namespace IfcViewer.UI
             try
             {
                 _fpController?.Dispose();
+                _sectionMgr?.DetachVisual();
                 _syncRevitEvent?.Dispose();
                 _sceneRoot?.Children.Clear();
                 _viewport?.Items.Clear();

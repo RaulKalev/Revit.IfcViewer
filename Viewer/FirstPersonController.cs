@@ -180,15 +180,19 @@ namespace IfcViewer.Viewer
 
         private void OnKeyDown(object sender, KeyEventArgs e)
         {
+            if (!_active) return;
             _keysDown.Add(e.Key);
 
-            // Consume WASD / arrow keys so the viewport doesn't pan/zoom
+            // Consume movement keys so the Helix viewport doesn't also pan/zoom.
+            // This is only reached when walk mode is active (handlers are unregistered
+            // on Deactivate), but the _active guard ensures no edge-case leakage.
             if (IsMovementKey(e.Key))
                 e.Handled = true;
         }
 
         private void OnKeyUp(object sender, KeyEventArgs e)
         {
+            if (!_active) return;
             _keysDown.Remove(e.Key);
         }
 

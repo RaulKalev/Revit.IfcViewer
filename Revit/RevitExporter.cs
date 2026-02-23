@@ -80,7 +80,9 @@ namespace IfcViewer.Revit
                     SpecularShininess = 12f,
                 };
 
-                var mesh3d = new MeshGeometryModel3D
+                // CrossSectionMeshGeometryModel3D extends MeshGeometryModel3D and
+                // exposes Plane1..8 for the section-plane tool.
+                var mesh3d = new CrossSectionMeshGeometryModel3D
                 {
                     Geometry      = helixGeom,
                     Material      = mat,

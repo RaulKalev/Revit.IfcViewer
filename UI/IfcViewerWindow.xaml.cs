@@ -47,6 +47,10 @@ namespace IfcViewer.UI
         private SyncRevitEvent _syncRevitEvent;
         private RevitModel     _revitModel;
 
+        // Stage 4a: first-person controller + section plane
+        private FirstPersonController _fpController;
+        private SectionPlaneManager   _sectionMgr;
+
         // ── Constructor ───────────────────────────────────────────────────────
         public IfcViewerWindow(UIApplication uiApp)
         {
@@ -127,6 +131,12 @@ namespace IfcViewer.UI
                 // 7. Create the Revit sync ExternalEvent (must be on UI thread)
                 _syncRevitEvent = new SyncRevitEvent(Dispatcher);
 
+                // 8. First-person controller (drives the camera; needs the viewport as key target)
+                _fpController = new FirstPersonController(_viewerHost.Camera, _viewport);
+
+                // 9. Section plane manager
+                _sectionMgr = new SectionPlaneManager();
+
                 UpdateStatus($"GPU Viewport Active  |  Triangles: {CountTriangles()}");
                 SessionLogger.Info("Viewport3DX created in code-behind — test scene rendered.");
             }
@@ -142,6 +152,7 @@ namespace IfcViewer.UI
         {
             try
             {
+                _fpController?.Dispose();
                 _syncRevitEvent?.Dispose();
                 _sceneRoot?.Children.Clear();
                 _viewport?.Items.Clear();
@@ -199,6 +210,12 @@ namespace IfcViewer.UI
                     _loadedModels.Add(ifcModel);
                     ModelListBox.SelectedItem = ifcModel;
 
+                    // Register all cross-section meshes with the section plane manager
+                    _sectionMgr?.RegisterGroup(ifcModel.SceneGroup);
+
+                    // Update section slider range to cover the full scene
+                    UpdateSectionBounds();
+
                     // Fit camera to the loaded geometry
                     _viewerHost.FitView(ifcModel.Bounds);
 
@@ -228,6 +245,7 @@ namespace IfcViewer.UI
             if (!(ModelListBox.SelectedItem is IfcModel selected)) return;
 
             // Remove from scene
+            _sectionMgr?.UnregisterGroup(selected.SceneGroup);
             _viewerHost.IfcRoot.Children.Remove(selected.SceneGroup);
             _loadedModels.Remove(selected);
 
@@ -250,10 +268,15 @@ namespace IfcViewer.UI
                 {
                     // Remove any previously exported Revit geometry
                     if (_revitModel != null)
+                    {
+                        _sectionMgr?.UnregisterGroup(_revitModel.SceneGroup);
                         _viewerHost.RevitRoot.Children.Remove(_revitModel.SceneGroup);
+                    }
 
                     _revitModel = model;
                     _viewerHost.RevitRoot.Children.Add(model.SceneGroup);
+                    _sectionMgr?.RegisterGroup(model.SceneGroup);
+                    UpdateSectionBounds();
 
                     // If no IFC is loaded, fit camera to Revit geometry
                     if (_loadedModels.Count == 0)
@@ -351,6 +374,113 @@ namespace IfcViewer.UI
                     total += CountTrianglesInGroup(sub);
             }
             return total;
+        }
+
+        // ── Walk mode ─────────────────────────────────────────────────────────
+        private void WalkMode_Checked(object sender, RoutedEventArgs e)
+        {
+            if (_fpController == null || _viewport == null) return;
+
+            // Switch Helix to WalkAround so its own mouse rotate stops fighting us
+            _viewport.CameraMode = CameraMode.WalkAround;
+            _viewport.IsRotationEnabled = false;
+
+            _fpController.Activate();
+            UpdateStatus("Walk mode  |  WASD / arrows = move  |  Right-drag = look  |  Q/E = up/down  |  Shift = sprint");
+            SessionLogger.Info("Walk mode activated.");
+        }
+
+        private void WalkMode_Unchecked(object sender, RoutedEventArgs e)
+        {
+            if (_fpController == null || _viewport == null) return;
+
+            _fpController.Deactivate();
+
+            // Restore inspect mode + rotation
+            _viewport.CameraMode = CameraMode.Inspect;
+            _viewport.IsRotationEnabled = true;
+
+            UpdateStatus("Orbit mode restored.");
+            SessionLogger.Info("Walk mode deactivated.");
+        }
+
+        // ── Section plane ─────────────────────────────────────────────────────
+        private void SectionPlane_Checked(object sender, RoutedEventArgs e)
+        {
+            if (_sectionMgr == null) return;
+            _sectionMgr.Enabled = true;
+            SessionLogger.Info("Section plane enabled.");
+        }
+
+        private void SectionPlane_Unchecked(object sender, RoutedEventArgs e)
+        {
+            if (_sectionMgr == null) return;
+            _sectionMgr.Enabled = false;
+            SessionLogger.Info("Section plane disabled.");
+        }
+
+        private void SectionAxis_Changed(object sender, RoutedEventArgs e)
+        {
+            if (_sectionMgr == null) return;
+            if (SectionAxisX?.IsChecked == true)      _sectionMgr.Axis = SectionAxis.X;
+            else if (SectionAxisY?.IsChecked == true) _sectionMgr.Axis = SectionAxis.Y;
+            else                                      _sectionMgr.Axis = SectionAxis.Z;
+
+            // Re-centre slider range on the new axis
+            UpdateSectionBounds();
+        }
+
+        private void SectionOffset_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (_sectionMgr == null) return;
+            _sectionMgr.Offset = (float)e.NewValue;
+            if (SectionOffsetLabel != null)
+                SectionOffsetLabel.Text = e.NewValue.ToString("F2");
+        }
+
+        /// <summary>
+        /// Recalculate the section slider min/max from the combined scene bounding box
+        /// so the slider always covers the full extent of loaded geometry.
+        /// </summary>
+        private void UpdateSectionBounds()
+        {
+            if (_sectionMgr == null || SectionOffsetSlider == null) return;
+
+            // Collect all known bounds
+            float min = float.MaxValue, max = float.MinValue;
+
+            foreach (var m in _loadedModels)
+            {
+                var b = m.Bounds;
+                if (b.Maximum == b.Minimum) continue;
+                UpdateMinMax(b, ref min, ref max);
+            }
+            if (_revitModel != null)
+            {
+                var b = _revitModel.Bounds;
+                if (b.Maximum != b.Minimum)
+                    UpdateMinMax(b, ref min, ref max);
+            }
+
+            if (min > max) { min = -50; max = 50; }
+
+            // Add 10% padding
+            float pad = Math.Max((max - min) * 0.1f, 1f);
+            min -= pad; max += pad;
+
+            _sectionMgr.MinBound = min;
+            _sectionMgr.MaxBound = max;
+
+            SectionOffsetSlider.Minimum = min;
+            SectionOffsetSlider.Maximum = max;
+        }
+
+        private static void UpdateMinMax(SharpDX.BoundingBox b, ref float min, ref float max)
+        {
+            // Choose the relevant component based on current axis selection would be ideal,
+            // but using the full extents keeps this simple and always correct.
+            min = Math.Min(min, Math.Min(b.Minimum.X, Math.Min(b.Minimum.Y, b.Minimum.Z)));
+            max = Math.Max(max, Math.Max(b.Maximum.X, Math.Max(b.Maximum.Y, b.Maximum.Z)));
         }
 
         // ── Resize edges ──────────────────────────────────────────────────────

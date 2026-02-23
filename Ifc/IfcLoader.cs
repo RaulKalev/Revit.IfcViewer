@@ -210,8 +210,10 @@ namespace IfcViewer.Ifc
                                    " Building Helix scene on UI thread…");
 
                 // ── Build WPF/Helix objects on the UI thread ─────────────────
-                // GroupModel3D, MeshGeometryModel3D and PhongMaterial are all
-                // DependencyObjects and must be created/owned by the UI thread.
+                // CrossSectionMeshGeometryModel3D (subclass of MeshGeometryModel3D)
+                // and PhongMaterial are DependencyObjects — must be created on UI thread.
+                // Using CrossSectionMeshGeometryModel3D so the SectionPlaneManager
+                // can apply Plane1 to every mesh for the section-plane tool.
                 return uiDispatcher.Invoke(() =>
                 {
                     var sceneGroup = new GroupModel3D();
@@ -239,7 +241,7 @@ namespace IfcViewer.Ifc
                             SpecularShininess = 12f,
                         };
 
-                        var mesh3d = new MeshGeometryModel3D
+                        var mesh3d = new CrossSectionMeshGeometryModel3D
                         {
                             Geometry      = helixGeom,
                             Material      = mat,

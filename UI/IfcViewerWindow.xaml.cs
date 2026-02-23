@@ -84,7 +84,9 @@ namespace IfcViewer.UI
                     Camera                   = _viewerHost.Camera,
                     ShowCoordinateSystem     = false,
                     ShowFrameRate            = true,
-                    EnableSSAO               = false,
+                    // SSAO — ambient occlusion darkens corners and contact zones, making
+                    // object shapes much easier to read in dense architectural models.
+                    EnableSSAO               = true,
                     // MSAA off — pure technical viewer, FXAA is sufficient and costs ~0ms
                     MSAA                     = MSAALevel.Disable,
                     Background               = new System.Windows.Media.SolidColorBrush(
@@ -578,8 +580,9 @@ namespace IfcViewer.UI
                     _wireframeRoot.Children.Add(new LineGeometryModel3D
                     {
                         Geometry  = lg,
-                        Color     = System.Windows.Media.Color.FromRgb(0x70, 0xBA, 0xBC),
-                        Thickness = 1.0,
+                        // Near-black (#222222) contrasts against any mesh surface colour.
+                        Color     = System.Windows.Media.Color.FromRgb(0x22, 0x22, 0x22),
+                        Thickness = 1.5,
                     });
                 }
                 SessionLogger.Info($"Wireframe overlay: {t.Result.Count} line object(s).");

@@ -1,6 +1,7 @@
 using Autodesk.Revit.UI;
 using HelixToolkit.Wpf.SharpDX;
 using IfcViewer.Ifc;
+using IfcViewer.Revit;
 using IfcViewer.Viewer;
 using Microsoft.Win32;
 using System;
@@ -41,6 +42,10 @@ namespace IfcViewer.UI
         // Loaded IFC models — bound to ModelListBox
         private readonly ObservableCollection<IfcModel> _loadedModels
             = new ObservableCollection<IfcModel>();
+
+        // Stage 3: Revit sync glue
+        private SyncRevitEvent _syncRevitEvent;
+        private RevitModel     _revitModel;
 
         // ── Constructor ───────────────────────────────────────────────────────
         public IfcViewerWindow(UIApplication uiApp)
@@ -119,6 +124,9 @@ namespace IfcViewer.UI
                 // 6. Bind the model list
                 ModelListBox.ItemsSource = _loadedModels;
 
+                // 7. Create the Revit sync ExternalEvent (must be on UI thread)
+                _syncRevitEvent = new SyncRevitEvent(Dispatcher);
+
                 UpdateStatus($"GPU Viewport Active  |  Triangles: {CountTriangles()}");
                 SessionLogger.Info("Viewport3DX created in code-behind — test scene rendered.");
             }
@@ -134,6 +142,7 @@ namespace IfcViewer.UI
         {
             try
             {
+                _syncRevitEvent?.Dispose();
                 _sceneRoot?.Children.Clear();
                 _viewport?.Items.Clear();
                 _viewerHost?.Dispose();
@@ -229,7 +238,41 @@ namespace IfcViewer.UI
         }
 
         private void SyncRevit_Click(object sender, RoutedEventArgs e)
-            => SessionLogger.Info("SyncRevit clicked (Stage 3 placeholder).");
+        {
+            if (_syncRevitEvent == null) return;
+
+            // Disable the button while export runs
+            SyncRevitButton.IsEnabled = false;
+            UpdateStatus("Exporting Revit geometry…");
+
+            _syncRevitEvent.Request(
+                onComplete: model =>
+                {
+                    // Remove any previously exported Revit geometry
+                    if (_revitModel != null)
+                        _viewerHost.RevitRoot.Children.Remove(_revitModel.SceneGroup);
+
+                    _revitModel = model;
+                    _viewerHost.RevitRoot.Children.Add(model.SceneGroup);
+
+                    // If no IFC is loaded, fit camera to Revit geometry
+                    if (_loadedModels.Count == 0)
+                        _viewerHost.FitView(model.Bounds);
+
+                    SyncRevitButton.IsEnabled = true;
+                    UpdateStatus($"Revit: {model.DisplayName}  |  {model.MeshCount} materials  |  {model.TriangleCount} triangles");
+                    SessionLogger.Info($"Revit sync complete: {model.TriangleCount} triangles");
+                },
+                onError: ex =>
+                {
+                    SyncRevitButton.IsEnabled = true;
+                    UpdateStatus("Revit export failed — see log.");
+                    MessageBox.Show(this,
+                        "Failed to export Revit geometry:\n\n" + ex.Message,
+                        "Revit Export Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                    SessionLogger.Error("Revit export failed.", ex);
+                });
+        }
 
         private void ResetCamera_Click(object sender, RoutedEventArgs e)
             => _viewerHost?.ResetCamera();

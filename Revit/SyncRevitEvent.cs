@@ -46,7 +46,8 @@ namespace IfcViewer.Revit
 
         // ── Exec mode ─────────────────────────────────────────────────────────
         private enum ExecMode { ManualSync, InitAutoSync, IncrementalSync }
-        private ExecMode _pendingMode = ExecMode.ManualSync;
+        // volatile: written on thread-pool (debounce timer), read on Revit API thread.
+        private volatile ExecMode _pendingMode = ExecMode.ManualSync;
 
         // ── Construction ──────────────────────────────────────────────────────
 
@@ -228,7 +229,15 @@ namespace IfcViewer.Revit
             if (!_autoSyncActive) return;
 
             // Filter to the document we're tracking.
-            if (_trackedDoc != null && !ReferenceEquals(args.GetDocument(), _trackedDoc)) return;
+            // Compare by PathName rather than ReferenceEquals: Revit COM interop can
+            // return a fresh C# wrapper object per call even for the same document,
+            // so ReferenceEquals always returns false and would discard every event.
+            if (_trackedDoc != null)
+            {
+                var changedDoc = args.GetDocument();
+                if (changedDoc == null) return;
+                if (changedDoc.PathName != _trackedDoc.PathName) return;
+            }
 
             lock (_dirtyLock)
             {

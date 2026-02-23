@@ -8,6 +8,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
 
@@ -39,6 +40,7 @@ namespace IfcViewer.UI
         private ViewerHost   _viewerHost;
         private Viewport3DX  _viewport;
         private GroupModel3D _sceneRoot;
+        private GroupModel3D _wireframeRoot;   // hard-edge line overlay
         private bool _isDarkTheme = true;
 
         // Loaded IFC models — bound to ModelListBox
@@ -141,6 +143,11 @@ namespace IfcViewer.UI
 
                 // 5. Build test scene
                 _viewerHost.BuildTestScene(_sceneRoot);
+
+                // 5b. Wireframe overlay group — lives alongside IfcRoot/RevitRoot.
+                //     Populated on demand by RebuildWireframe(); never holds mesh nodes.
+                _wireframeRoot = new GroupModel3D();
+                _sceneRoot.Children.Add(_wireframeRoot);
 
                 // 6. Bind the model list
                 ModelListBox.ItemsSource = _loadedModels;
@@ -259,6 +266,9 @@ namespace IfcViewer.UI
                     // Register all cross-section meshes with the section plane manager
                     _sectionMgr?.RegisterGroup(ifcModel.SceneGroup);
 
+                    // Extend the wireframe overlay if it is currently active
+                    if (WireframeToggle?.IsChecked == true) RebuildWireframe();
+
                     // Update section slider range to cover the full scene
                     UpdateSectionBounds();
 
@@ -314,6 +324,9 @@ namespace IfcViewer.UI
             _sectionMgr?.UnregisterGroup(selected.SceneGroup);
             _viewerHost.IfcRoot.Children.Remove(selected.SceneGroup);
             _loadedModels.Remove(selected);
+
+            // Rebuild wireframe without the removed model's edges
+            if (WireframeToggle?.IsChecked == true) RebuildWireframe();
 
             UpdateStatus(_loadedModels.Count == 0
                 ? "GPU Viewport Active"
@@ -413,6 +426,9 @@ namespace IfcViewer.UI
 
             if (fitCamera) _viewerHost.FitView(model.Bounds);
 
+            // Rebuild wireframe to reflect the new/changed Revit geometry
+            if (WireframeToggle?.IsChecked == true) RebuildWireframe();
+
             UpdateStatus($"Revit: {model.DisplayName}  |  {model.MeshCount} elements  |  {model.TriangleCount} triangles");
             SessionLogger.Info($"Revit update applied: {model.TriangleCount} triangles");
         }
@@ -471,6 +487,9 @@ namespace IfcViewer.UI
                 UpdateSectionBounds();
                 _viewerHost.FitView(newModel.Bounds);
 
+                // Rebuild wireframe for the freshly reloaded geometry
+                if (WireframeToggle?.IsChecked == true) RebuildWireframe();
+
                 // Restart the watcher for the reloaded path
                 var newWatcher = new IfcFileWatcher(path,
                     () => Dispatcher.BeginInvoke((Action)(() => ShowReloadBanner(path))));
@@ -506,25 +525,80 @@ namespace IfcViewer.UI
             => _viewerHost?.ResetCamera();
 
         private void Wireframe_Checked(object sender, RoutedEventArgs e)
-            => ApplyWireframe(true);
+            => RebuildWireframe();
 
         private void Wireframe_Unchecked(object sender, RoutedEventArgs e)
-            => ApplyWireframe(false);
-
-        private void ApplyWireframe(bool on)
         {
-            if (_sceneRoot != null) ApplyWireframeToGroup(_sceneRoot, on);
-            SessionLogger.Info($"Wireframe {(on ? "on" : "off")}.");
+            _wireframeRoot?.Children.Clear();
+            SessionLogger.Info("Wireframe off.");
         }
 
-        private static void ApplyWireframeToGroup(GroupModel3D group, bool on)
+        /// <summary>
+        /// Rebuilds the hard-edge wireframe overlay for all geometry currently in the
+        /// scene. Edge extraction runs on a thread-pool thread to avoid freezing the UI
+        /// for large models; the overlay is populated back on the dispatcher thread.
+        /// </summary>
+        private void RebuildWireframe()
+        {
+            if (_wireframeRoot == null) return;
+            _wireframeRoot.Children.Clear();
+            if (WireframeToggle?.IsChecked != true) return;
+
+            // Snapshot geometry references on the UI thread before going async —
+            // Vector3Collection / IntCollection are WPF observable collections that
+            // must not be enumerated concurrently with mutations.
+            var meshList = new List<MeshGeometry3D>();
+            CollectMeshGeometries(_sceneRoot, meshList);
+
+            if (meshList.Count == 0) return;
+            SessionLogger.Info($"Wireframe on — extracting hard edges from {meshList.Count} mesh(es).");
+
+            Task.Run(() =>
+            {
+                var lineGeoms = new List<LineGeometry3D>(meshList.Count);
+                foreach (var mg in meshList)
+                {
+                    var lg = WireframeHelper.ExtractHardEdges(mg);
+                    if (lg != null) lineGeoms.Add(lg);
+                }
+                return lineGeoms;
+            }).ContinueWith(t =>
+            {
+                if (t.IsFaulted)
+                {
+                    SessionLogger.Error("Wireframe edge extraction failed.", t.Exception?.GetBaseException());
+                    return;
+                }
+                // Guard: user may have toggled off while we were computing
+                if (WireframeToggle?.IsChecked != true) return;
+
+                _wireframeRoot.Children.Clear();
+                foreach (var lg in t.Result)
+                {
+                    _wireframeRoot.Children.Add(new LineGeometryModel3D
+                    {
+                        Geometry  = lg,
+                        Color     = System.Windows.Media.Color.FromRgb(0x70, 0xBA, 0xBC),
+                        Thickness = 1.0,
+                    });
+                }
+                SessionLogger.Info($"Wireframe overlay: {t.Result.Count} line object(s).");
+            }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
+        /// <summary>
+        /// Recursively collects all <see cref="MeshGeometry3D"/> geometry objects from
+        /// the scene hierarchy, skipping <see cref="_wireframeRoot"/> (line nodes only).
+        /// </summary>
+        private void CollectMeshGeometries(GroupModel3D group, List<MeshGeometry3D> results)
         {
             foreach (var child in group.Children)
             {
-                if (child is MeshGeometryModel3D mesh)
-                    mesh.RenderWireframe = on;
+                if (ReferenceEquals(child, _wireframeRoot)) continue;
+                if (child is MeshGeometryModel3D m && m.Geometry is MeshGeometry3D mg)
+                    results.Add(mg);
                 else if (child is GroupModel3D sub)
-                    ApplyWireframeToGroup(sub, on);
+                    CollectMeshGeometries(sub, results);
             }
         }
 

@@ -101,7 +101,7 @@ namespace IfcViewer.Viewer
         }
 
         // ── Scene helpers ────────────────────────────────────────────────────
-        /// <summary>Build the static test scene shown at Stage 0→1: axis lines + cube.</summary>
+        /// <summary>Initialise the scene: lights and IFC/Revit root groups.</summary>
         public void BuildTestScene(GroupModel3D sceneGroup)
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -125,146 +125,12 @@ namespace IfcViewer.Viewer
             sceneGroup.Children.Add(fillLight);
             sceneGroup.Children.Add(ambientLight);
 
-            // ── Ground grid ─────────────────────────────────────────────────
-            var grid = BuildGrid(20, 1f);
-            sceneGroup.Children.Add(grid);
-
-            // ── Axis indicator (X=red, Y=green, Z=blue) ─────────────────────
-            sceneGroup.Children.Add(BuildAxisLine(new Vector3(0, 0, 0), new Vector3(3, 0, 0), Colors.Red));
-            sceneGroup.Children.Add(BuildAxisLine(new Vector3(0, 0, 0), new Vector3(0, 3, 0), Colors.LimeGreen));
-            sceneGroup.Children.Add(BuildAxisLine(new Vector3(0, 0, 0), new Vector3(0, 0, 3), Colors.DodgerBlue));
-
-            // ── Test cube (1×1×1 at origin) ─────────────────────────────────
-            var cubeMesh = new MeshGeometry3D();
-            BuildUnitCube(cubeMesh);
-
-            var cubeMat = new PhongMaterial
-            {
-                DiffuseColor  = new Color4(0.2f, 0.6f, 0.9f, 1f),
-                SpecularColor = new Color4(0.5f, 0.5f, 0.5f, 1f),
-                SpecularShininess = 32f
-            };
-
-            var cubeModel = new MeshGeometryModel3D
-            {
-                Geometry = cubeMesh,
-                Material = cubeMat,
-                Transform = new Media3D.TranslateTransform3D(0, 0.5, 0) // sit on grid
-            };
-            sceneGroup.Children.Add(cubeModel);
-
-            // ── Also add the IFC / Revit root groups ────────────────────────
+            // ── IFC / Revit root groups ──────────────────────────────────────
             sceneGroup.Children.Add(IfcRoot);
             sceneGroup.Children.Add(RevitRoot);
 
             sw.Stop();
-            SessionLogger.Info($"Test scene built in {sw.ElapsedMilliseconds} ms.");
-        }
-
-        // ── Internal geometry helpers ────────────────────────────────────────
-        private static LineGeometryModel3D BuildAxisLine(Vector3 from, Vector3 to, System.Windows.Media.Color color)
-        {
-            var positions = new Vector3Collection { from, to };
-            var indices   = new IntCollection { 0, 1 };
-            var geom = new LineGeometry3D { Positions = positions, Indices = indices };
-
-            return new LineGeometryModel3D
-            {
-                Geometry  = geom,
-                Color     = color,
-                Thickness = 2.0
-            };
-        }
-
-        private static LineGeometryModel3D BuildGrid(int halfExtent, float step)
-        {
-            var positions = new Vector3Collection();
-            var indices   = new IntCollection();
-            int idx = 0;
-
-            var gridColor = System.Windows.Media.Color.FromArgb(100, 80, 80, 80);
-
-            for (int i = -halfExtent; i <= halfExtent; i++)
-            {
-                float fi = i * step;
-                float ext = halfExtent * step;
-
-                // Lines parallel to Z
-                positions.Add(new Vector3(fi, 0, -ext));
-                positions.Add(new Vector3(fi, 0,  ext));
-                indices.Add(idx++);
-                indices.Add(idx++);
-
-                // Lines parallel to X
-                positions.Add(new Vector3(-ext, 0, fi));
-                positions.Add(new Vector3( ext, 0, fi));
-                indices.Add(idx++);
-                indices.Add(idx++);
-            }
-
-            var geom = new LineGeometry3D { Positions = positions, Indices = indices };
-            return new LineGeometryModel3D { Geometry = geom, Color = gridColor, Thickness = 0.5 };
-        }
-
-        private static void BuildUnitCube(MeshGeometry3D mesh)
-        {
-            // 8 vertices of a unit cube centred at origin (Y from 0 to 1 after transform)
-            var p = new Vector3[]
-            {
-                new Vector3(-0.5f, -0.5f, -0.5f), // 0 bottom-back-left
-                new Vector3( 0.5f, -0.5f, -0.5f), // 1 bottom-back-right
-                new Vector3( 0.5f,  0.5f, -0.5f), // 2 top-back-right
-                new Vector3(-0.5f,  0.5f, -0.5f), // 3 top-back-left
-                new Vector3(-0.5f, -0.5f,  0.5f), // 4 bottom-front-left
-                new Vector3( 0.5f, -0.5f,  0.5f), // 5 bottom-front-right
-                new Vector3( 0.5f,  0.5f,  0.5f), // 6 top-front-right
-                new Vector3(-0.5f,  0.5f,  0.5f), // 7 top-front-left
-            };
-
-            // 6 faces × 4 verts each (quads split into 2 triangles)
-            int[][] faces = new[]
-            {
-                new[]{0,3,2,1}, // back   (-Z)
-                new[]{4,5,6,7}, // front  (+Z)
-                new[]{0,1,5,4}, // bottom (-Y)
-                new[]{3,7,6,2}, // top    (+Y)
-                new[]{0,4,7,3}, // left   (-X)
-                new[]{1,2,6,5}, // right  (+X)
-            };
-
-            var positions = new Vector3Collection();
-            var normals   = new Vector3Collection();
-            var indices   = new IntCollection();
-
-            int baseIdx = 0;
-            Vector3[] faceNormals =
-            {
-                new Vector3( 0, 0,-1),
-                new Vector3( 0, 0, 1),
-                new Vector3( 0,-1, 0),
-                new Vector3( 0, 1, 0),
-                new Vector3(-1, 0, 0),
-                new Vector3( 1, 0, 0),
-            };
-
-            for (int f = 0; f < faces.Length; f++)
-            {
-                var face = faces[f];
-                var n    = faceNormals[f];
-                foreach (int vi in face)
-                {
-                    positions.Add(p[vi]);
-                    normals.Add(n);
-                }
-                // two triangles: 0-1-2, 0-2-3
-                indices.Add(baseIdx);     indices.Add(baseIdx + 1); indices.Add(baseIdx + 2);
-                indices.Add(baseIdx);     indices.Add(baseIdx + 2); indices.Add(baseIdx + 3);
-                baseIdx += 4;
-            }
-
-            mesh.Positions = positions;
-            mesh.Normals   = normals;
-            mesh.Indices   = indices;
+            SessionLogger.Info($"Scene initialised in {sw.ElapsedMilliseconds} ms.");
         }
 
         // ── IDisposable ──────────────────────────────────────────────────────

@@ -47,9 +47,10 @@ namespace IfcViewer.UI
         private SyncRevitEvent _syncRevitEvent;
         private RevitModel     _revitModel;
 
-        // Stage 4a: first-person controller + section plane
+        // Stage 4a: first-person controller + section plane + settings
         private FirstPersonController _fpController;
         private SectionPlaneManager   _sectionMgr;
+        private ViewerSettings        _settings = new ViewerSettings();
 
         // ── Constructor ───────────────────────────────────────────────────────
         public IfcViewerWindow(UIApplication uiApp)
@@ -150,7 +151,14 @@ namespace IfcViewer.UI
                 _sectionMgr = new SectionPlaneManager();
                 _sectionMgr.AttachVisual(_sceneRoot);
 
-                UpdateStatus($"GPU Viewport Active  |  Triangles: {CountTriangles()}");
+                // 10. Apply initial settings (FOV etc.)
+                ApplySettings();
+
+                // 11. Intercept scroll wheel at Window level to implement instant, inertia-free
+                //     zoom. Mark e.Handled=true so Helix's smooth animated zoom never fires.
+                this.PreviewMouseWheel += OnPreviewMouseWheel;
+
+                UpdateStatus($"GPU Viewport Active");
                 SessionLogger.Info("Viewport3DX created in code-behind — test scene rendered.");
             }
             catch (Exception ex)
@@ -165,6 +173,7 @@ namespace IfcViewer.UI
         {
             try
             {
+                this.PreviewMouseWheel -= OnPreviewMouseWheel;
                 _fpController?.Dispose();
                 _sectionMgr?.DetachVisual();
                 _syncRevitEvent?.Dispose();
@@ -509,6 +518,71 @@ namespace IfcViewer.UI
             // but using the full extents keeps this simple and always correct.
             min = Math.Min(min, Math.Min(b.Minimum.X, Math.Min(b.Minimum.Y, b.Minimum.Z)));
             max = Math.Max(max, Math.Max(b.Maximum.X, Math.Max(b.Maximum.Y, b.Maximum.Z)));
+        }
+
+        // ── Settings ──────────────────────────────────────────────────────────
+
+        private void Settings_Click(object sender, RoutedEventArgs e)
+        {
+            var win = new SettingsWindow(_settings, ApplySettings)
+            {
+                Owner = this
+            };
+            win.Show();
+        }
+
+        /// <summary>
+        /// Push all values from <see cref="_settings"/> into the live sub-systems.
+        /// Called once on startup and whenever the settings window reports a change.
+        /// </summary>
+        private void ApplySettings()
+        {
+            // Walk controller
+            if (_fpController != null)
+            {
+                _fpController.WalkSpeed        = _settings.WalkSpeed;
+                _fpController.SprintMultiplier = _settings.SprintMultiplier;
+                _fpController.MouseSensitivity = _settings.MouseSensitivity;
+            }
+
+            // Camera FOV
+            if (_viewerHost?.Camera != null)
+                _viewerHost.Camera.FieldOfView = _settings.FieldOfView;
+        }
+
+        // ── Instant scroll-wheel zoom (no inertia) ────────────────────────────
+
+        /// <summary>
+        /// Handle scroll-wheel zoom ourselves at the Window level so we can apply
+        /// an instant, fixed-step zoom and block Helix's smooth (inertia) zoom
+        /// before it ever fires.
+        /// </summary>
+        private void OnPreviewMouseWheel(object sender, MouseWheelEventArgs e)
+        {
+            if (_viewport == null || _viewerHost?.Camera == null) return;
+            if (_fpController != null && _fpController.IsActive) return; // walk mode handles its own speed
+
+            var cam = _viewerHost.Camera;
+
+            // Camera-to-look-target distance
+            var lookDir = cam.LookDirection;
+            double dist = lookDir.Length; // LookDirection magnitude = distance to target
+
+            if (dist < 0.001) dist = 0.001;
+
+            // Fraction to move per notch (delta comes in multiples of 120 for a standard wheel)
+            double fraction = _settings.ZoomStep * (e.Delta / 120.0);
+            double move     = dist * fraction;
+
+            // Normalise look direction and move position along it
+            lookDir.Normalize();
+            cam.Position = new System.Windows.Media.Media3D.Point3D(
+                cam.Position.X + lookDir.X * move,
+                cam.Position.Y + lookDir.Y * move,
+                cam.Position.Z + lookDir.Z * move);
+
+            // Block Helix's own zoom handler completely
+            e.Handled = true;
         }
 
         // ── Resize edges ──────────────────────────────────────────────────────

@@ -131,8 +131,10 @@ namespace IfcViewer.UI
                 // 7. Create the Revit sync ExternalEvent (must be on UI thread)
                 _syncRevitEvent = new SyncRevitEvent(Dispatcher);
 
-                // 8. First-person controller (drives the camera; needs the viewport as key target)
-                _fpController = new FirstPersonController(_viewerHost.Camera, _viewport);
+                // 8. First-person controller
+                //    keyTarget   = viewport (keyboard events)
+                //    mouseTarget = this Window (PreviewMouse tunnel fires before Helix)
+                _fpController = new FirstPersonController(_viewerHost.Camera, _viewport, this);
 
                 // 9. Section plane manager
                 _sectionMgr = new SectionPlaneManager();
@@ -381,9 +383,14 @@ namespace IfcViewer.UI
         {
             if (_fpController == null || _viewport == null) return;
 
-            // Switch Helix to WalkAround so its own mouse rotate stops fighting us
-            _viewport.CameraMode = CameraMode.WalkAround;
+            // Reduce near plane so geometry doesn't clip when camera is close/inside surfaces
+            _viewerHost.SetWalkMode(true);
+
+            // Switch Helix to WalkAround and disable its rotation so it won't fight us.
+            // Pan is also disabled — our PreviewMouse handler owns right-drag fully.
+            _viewport.CameraMode        = CameraMode.WalkAround;
             _viewport.IsRotationEnabled = false;
+            _viewport.IsPanEnabled      = false;
 
             _fpController.Activate();
             UpdateStatus("Walk mode  |  WASD / arrows = move  |  Right-drag = look  |  Q/E = up/down  |  Shift = sprint");
@@ -396,9 +403,11 @@ namespace IfcViewer.UI
 
             _fpController.Deactivate();
 
-            // Restore inspect mode + rotation
-            _viewport.CameraMode = CameraMode.Inspect;
+            // Restore orbit mode
+            _viewerHost.SetWalkMode(false);
+            _viewport.CameraMode        = CameraMode.Inspect;
             _viewport.IsRotationEnabled = true;
+            _viewport.IsPanEnabled      = true;
 
             UpdateStatus("Orbit mode restored.");
             SessionLogger.Info("Walk mode deactivated.");

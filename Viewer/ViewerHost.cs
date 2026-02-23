@@ -50,6 +50,20 @@ namespace IfcViewer.Viewer
         }
 
         // ── Camera helpers ───────────────────────────────────────────────────
+
+        /// <summary>
+        /// Switch near-plane distance for walk-through mode.
+        /// Walk mode needs a very small near plane (0.001 m) so geometry is not
+        /// clipped when the camera is close to or inside a surface.
+        /// Orbit/inspect mode can use a slightly larger value (0.01 m) which gives
+        /// better depth-buffer precision at a distance.
+        /// </summary>
+        public void SetWalkMode(bool walking)
+        {
+            Camera.NearPlaneDistance = walking ? 0.001 : 0.01;
+            SessionLogger.Info($"NearPlane → {Camera.NearPlaneDistance} ({(walking ? "walk" : "orbit")})");
+        }
+
         /// <summary>Animate the camera back to the default position smoothly.</summary>
         public void ResetCamera()
         {

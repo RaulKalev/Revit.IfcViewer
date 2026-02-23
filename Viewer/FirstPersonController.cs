@@ -14,10 +14,9 @@ namespace IfcViewer.Viewer
     /// <see cref="PerspectiveCamera"/>.
     ///
     /// Usage:
-    ///   1. Construct with the camera and the viewport element (for key events).
+    ///   1. Construct with the camera, the viewport (for key events) and the
+    ///      window (for mouse Preview tunnel events that fire before Helix).
     ///   2. Call <see cref="Activate"/> to start; <see cref="Deactivate"/> to stop.
-    ///   3. The controller installs PreviewKeyDown/Up handlers on <paramref name="keyTarget"/>
-    ///      and ticks a DispatcherTimer to move the camera each frame.
     /// </summary>
     public sealed class FirstPersonController : IDisposable
     {
@@ -33,7 +32,8 @@ namespace IfcViewer.Viewer
 
         // ── Dependencies ─────────────────────────────────────────────────────
         private readonly PerspectiveCamera _camera;
-        private readonly UIElement         _keyTarget;
+        private readonly UIElement         _keyTarget;   // viewport — keys
+        private readonly UIElement         _mouseTarget; // window  — mouse Preview (fires before Helix)
 
         // ── State ────────────────────────────────────────────────────────────
         private readonly DispatcherTimer        _timer;
@@ -50,10 +50,20 @@ namespace IfcViewer.Viewer
         private double _pitch;
 
         // ── Constructor ──────────────────────────────────────────────────────
-        public FirstPersonController(PerspectiveCamera camera, UIElement keyTarget)
+        /// <param name="camera">The Helix PerspectiveCamera to drive.</param>
+        /// <param name="keyTarget">The Viewport3DX — receives keyboard events.</param>
+        /// <param name="mouseTarget">
+        ///   The Window (or any ancestor of the viewport) — receives PreviewMouse
+        ///   tunnel events that fire BEFORE Helix's CameraController, so mouse-look
+        ///   can intercept right-drag before Helix does.
+        /// </param>
+        public FirstPersonController(PerspectiveCamera camera,
+                                     UIElement keyTarget,
+                                     UIElement mouseTarget)
         {
-            _camera    = camera    ?? throw new ArgumentNullException(nameof(camera));
-            _keyTarget = keyTarget ?? throw new ArgumentNullException(nameof(keyTarget));
+            _camera      = camera      ?? throw new ArgumentNullException(nameof(camera));
+            _keyTarget   = keyTarget   ?? throw new ArgumentNullException(nameof(keyTarget));
+            _mouseTarget = mouseTarget ?? keyTarget; // fall back to viewport if not supplied
 
             _timer = new DispatcherTimer(DispatcherPriority.Render)
             {
@@ -78,12 +88,15 @@ namespace IfcViewer.Viewer
             _keysDown.Clear();
             _lastTick = DateTime.UtcNow;
 
-            _keyTarget.PreviewKeyDown += OnKeyDown;
-            _keyTarget.PreviewKeyUp   += OnKeyUp;
-            _keyTarget.MouseDown      += OnMouseDown;
-            _keyTarget.MouseUp        += OnMouseUp;
-            _keyTarget.MouseMove      += OnMouseMove;
-            _keyTarget.LostFocus      += OnLostFocus;
+            _keyTarget.PreviewKeyDown        += OnKeyDown;
+            _keyTarget.PreviewKeyUp          += OnKeyUp;
+            _keyTarget.LostFocus             += OnLostFocus;
+            // Preview (tunnel) events on the window ancestor fire before Helix's
+            // CameraController child can consume them — this is how we intercept
+            // right-drag for mouse-look even when Helix would otherwise handle it.
+            _mouseTarget.PreviewMouseDown    += OnMouseDown;
+            _mouseTarget.PreviewMouseUp      += OnMouseUp;
+            _mouseTarget.PreviewMouseMove    += OnMouseMove;
 
             _timer.Start();
             _keyTarget.Focus();
@@ -101,12 +114,12 @@ namespace IfcViewer.Viewer
             _keysDown.Clear();
             StopMouseLook();
 
-            _keyTarget.PreviewKeyDown -= OnKeyDown;
-            _keyTarget.PreviewKeyUp   -= OnKeyUp;
-            _keyTarget.MouseDown      -= OnMouseDown;
-            _keyTarget.MouseUp        -= OnMouseUp;
-            _keyTarget.MouseMove      -= OnMouseMove;
-            _keyTarget.LostFocus      -= OnLostFocus;
+            _keyTarget.PreviewKeyDown        -= OnKeyDown;
+            _keyTarget.PreviewKeyUp          -= OnKeyUp;
+            _keyTarget.LostFocus             -= OnLostFocus;
+            _mouseTarget.PreviewMouseDown    -= OnMouseDown;
+            _mouseTarget.PreviewMouseUp      -= OnMouseUp;
+            _mouseTarget.PreviewMouseMove    -= OnMouseMove;
 
             SessionLogger.Info("FirstPersonController: deactivated.");
         }
@@ -189,12 +202,13 @@ namespace IfcViewer.Viewer
 
         private void OnMouseDown(object sender, MouseButtonEventArgs e)
         {
+            if (!_active) return;
             if (e.RightButton == MouseButtonState.Pressed)
             {
                 _mouseLooking = true;
-                _lastMousePos = e.GetPosition(_keyTarget);
-                _keyTarget.CaptureMouse();
-                e.Handled = true;
+                _lastMousePos = e.GetPosition(_mouseTarget);
+                _mouseTarget.CaptureMouse();
+                e.Handled = true; // stops Helix CameraController from also rotating
             }
         }
 
@@ -206,9 +220,9 @@ namespace IfcViewer.Viewer
 
         private void OnMouseMove(object sender, MouseEventArgs e)
         {
-            if (!_mouseLooking) return;
+            if (!_active || !_mouseLooking) return;
 
-            var pos   = e.GetPosition(_keyTarget);
+            var pos   = e.GetPosition(_mouseTarget);
             double dx = pos.X - _lastMousePos.X;
             double dy = pos.Y - _lastMousePos.Y;
             _lastMousePos = pos;
@@ -222,7 +236,7 @@ namespace IfcViewer.Viewer
             GetVectors(_yaw, _pitch, out var forward, out _, out _);
             _camera.LookDirection = ToWpf(forward);
             _camera.UpDirection   = new Media3D.Vector3D(0, 1, 0);
-            e.Handled = true;
+            e.Handled = true; // stops Helix from panning/rotating on the same move
         }
 
         private void StopMouseLook()
@@ -230,7 +244,7 @@ namespace IfcViewer.Viewer
             if (_mouseLooking)
             {
                 _mouseLooking = false;
-                _keyTarget.ReleaseMouseCapture();
+                _mouseTarget.ReleaseMouseCapture();
             }
         }
 

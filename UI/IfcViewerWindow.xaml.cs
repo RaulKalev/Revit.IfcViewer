@@ -50,7 +50,7 @@ namespace IfcViewer.UI
         // Stage 4a: first-person controller + section plane + settings
         private FirstPersonController _fpController;
         private SectionPlaneManager   _sectionMgr;
-        private ViewerSettings        _settings = new ViewerSettings();
+        private ViewerSettings        _settings;
 
         // ── Constructor ───────────────────────────────────────────────────────
         public IfcViewerWindow(UIApplication uiApp)
@@ -151,7 +151,8 @@ namespace IfcViewer.UI
                 _sectionMgr = new SectionPlaneManager();
                 _sectionMgr.AttachVisual(_sceneRoot);
 
-                // 10. Apply initial settings (FOV etc.)
+                // 10. Load settings from disk (or defaults) and apply them
+                _settings = ViewerSettings.Load();
                 ApplySettings();
 
                 // 11. Intercept scroll wheel at Window level to implement instant, inertia-free

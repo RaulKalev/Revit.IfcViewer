@@ -1,8 +1,12 @@
+using Newtonsoft.Json;
+using System;
+using System.IO;
+
 namespace IfcViewer.Viewer
 {
     /// <summary>
     /// Centralised user-configurable viewer settings.
-    /// All values are plain properties — no serialisation yet.
+    /// Persisted to JSON in AppData/Roaming.
     /// Owned by <see cref="IfcViewer.UI.IfcViewerWindow"/> and
     /// forwarded to the relevant sub-systems on change.
     /// </summary>
@@ -29,5 +33,53 @@ namespace IfcViewer.Viewer
         // ── Camera ────────────────────────────────────────────────────────────
         /// <summary>Perspective field of view in degrees.</summary>
         public double FieldOfView { get; set; } = 45.0;
+
+        // ── Serialization ──────────────────────────────────────────────────────
+
+        /// <summary>Path to the persisted settings JSON file in AppData.</summary>
+        private static string SettingsPath =>
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "Autodesk", "Revit", "Addins", "RKTools", "IfcViewer",
+                "settings.json");
+
+        /// <summary>Load settings from disk, or return defaults if file doesn't exist.</summary>
+        public static ViewerSettings Load()
+        {
+            try
+            {
+                if (File.Exists(SettingsPath))
+                {
+                    string json = File.ReadAllText(SettingsPath);
+                    var loaded = JsonConvert.DeserializeObject<ViewerSettings>(json);
+                    if (loaded != null) return loaded;
+                }
+            }
+            catch (Exception ex)
+            {
+                SessionLogger.Warn($"Failed to load settings: {ex.Message}");
+            }
+
+            return new ViewerSettings(); // defaults
+        }
+
+        /// <summary>Save settings to disk.</summary>
+        public void Save()
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(SettingsPath);
+                if (!Directory.Exists(dir))
+                    Directory.CreateDirectory(dir);
+
+                string json = JsonConvert.SerializeObject(this, Formatting.Indented);
+                File.WriteAllText(SettingsPath, json);
+                SessionLogger.Info("Settings saved.");
+            }
+            catch (Exception ex)
+            {
+                SessionLogger.Error($"Failed to save settings: {ex.Message}");
+            }
+        }
     }
 }

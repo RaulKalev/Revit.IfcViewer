@@ -211,26 +211,37 @@
                     </StackPanel>
                 </ScrollViewer>
 
-                <!-- ── Footer: Reset + Close ── -->
+                <!-- ── Footer: Reset + Apply + Close ── -->
                 <Border Grid.Row="2"
                         BorderBrush="{DynamicResource BorderBrush}"
                         BorderThickness="0,1,0,0"
-                        Padding="12,6">
+                        Padding="12,8">
                     <Grid>
                         <Button x:Name="ResetButton"
                                 Content="Reset to defaults"
                                 HorizontalAlignment="Left"
-                                Width="130" Height="30"
+                                Width="130" Height="32"
+                                Margin="0,0,0,0"
                                 Style="{StaticResource CustomActionButtonStyle}"
                                 FontSize="11"
                                 Click="Reset_Click"/>
-                        <Button x:Name="ApplyButton"
-                                Content="Close"
-                                HorizontalAlignment="Right"
-                                Width="80" Height="30"
-                                Style="{StaticResource CustomActionButtonStyle}"
-                                FontSize="11"
-                                Click="Close_Click"/>
+                        <StackPanel HorizontalAlignment="Right"
+                                    Orientation="Horizontal">
+                            <Button x:Name="ApplyButton"
+                                    Content="Apply"
+                                    Width="70" Height="32"
+                                    Margin="0,0,6,0"
+                                    Style="{StaticResource CustomActionButtonStyle}"
+                                    FontSize="11"
+                                    Click="Apply_Click"/>
+                            <Button x:Name="CloseButtonFooter"
+                                    Content="Close"
+                                    Width="70" Height="32"
+                                    Margin="0,0,0,0"
+                                    Style="{StaticResource CustomActionButtonStyle}"
+                                    FontSize="11"
+                                    Click="Close_Click"/>
+                        </StackPanel>
                     </Grid>
                 </Border>
 

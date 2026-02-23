@@ -16,6 +16,7 @@ namespace IfcViewer.UI
         private readonly ViewerSettings _settings;
         private readonly Action         _onChange;
         private bool _loading;
+        private bool _hasChanges;  // track if user has modified anything since load
 
         /// <summary>
         /// Create the settings window.
@@ -69,7 +70,8 @@ namespace IfcViewer.UI
             if (_loading || _settings == null) return;
             _settings.WalkSpeed = e.NewValue;
             WalkSpeedLabel.Text = e.NewValue.ToString("F1");
-            _onChange?.Invoke();
+            _hasChanges = true;
+            UpdateApplyButtonState();
         }
 
         private void Sprint_ValueChanged(object sender,
@@ -78,7 +80,8 @@ namespace IfcViewer.UI
             if (_loading || _settings == null) return;
             _settings.SprintMultiplier = e.NewValue;
             SprintLabel.Text = e.NewValue.ToString("F1") + "x";
-            _onChange?.Invoke();
+            _hasChanges = true;
+            UpdateApplyButtonState();
         }
 
         private void MouseSens_ValueChanged(object sender,
@@ -87,7 +90,8 @@ namespace IfcViewer.UI
             if (_loading || _settings == null) return;
             _settings.MouseSensitivity = e.NewValue / 1000.0;
             MouseSensLabel.Text = ((int)e.NewValue).ToString();
-            _onChange?.Invoke();
+            _hasChanges = true;
+            UpdateApplyButtonState();
         }
 
         private void ZoomStep_ValueChanged(object sender,
@@ -96,7 +100,8 @@ namespace IfcViewer.UI
             if (_loading || _settings == null) return;
             _settings.ZoomStep = e.NewValue / 100.0;
             ZoomStepLabel.Text = ((int)e.NewValue) + "%";
-            _onChange?.Invoke();
+            _hasChanges = true;
+            UpdateApplyButtonState();
         }
 
         private void Fov_ValueChanged(object sender,
@@ -105,7 +110,13 @@ namespace IfcViewer.UI
             if (_loading || _settings == null) return;
             _settings.FieldOfView = e.NewValue;
             FovLabel.Text = ((int)e.NewValue) + "°";
-            _onChange?.Invoke();
+            _hasChanges = true;
+            UpdateApplyButtonState();
+        }
+
+        private void UpdateApplyButtonState()
+        {
+            ApplyButton.IsEnabled = _hasChanges;
         }
 
         // ── Reset ─────────────────────────────────────────────────────────────
@@ -120,7 +131,18 @@ namespace IfcViewer.UI
             _settings.FieldOfView      = 45.0;
 
             LoadFromSettings();
+            _hasChanges = true;
+            UpdateApplyButtonState();
+        }
+
+        private void Apply_Click(object sender, RoutedEventArgs e)
+        {
+            // Apply the current settings to the viewer and save to disk
             _onChange?.Invoke();
+            _settings.Save();
+            _hasChanges = false;
+            UpdateApplyButtonState();
+            SessionLogger.Info("Settings applied and saved.");
         }
 
         // ── Window chrome ─────────────────────────────────────────────────────

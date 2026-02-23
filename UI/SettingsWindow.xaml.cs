@@ -27,8 +27,14 @@ namespace IfcViewer.UI
         {
             _settings = settings ?? throw new ArgumentNullException(nameof(settings));
             _onChange = onChange;
+
+            // Set _loading BEFORE InitializeComponent so that ValueChanged events
+            // fired by the XAML parser (while it sets slider Minimum/Maximum/Value)
+            // don't overwrite the saved settings with XAML default values.
+            _loading = true;
             InitializeComponent();
-            LoadFromSettings();
+
+            LoadFromSettings(); // sets _loading = true again, writes slider values, then resets to false
         }
 
         // ── Load current values into controls ─────────────────────────────────

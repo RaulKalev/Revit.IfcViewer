@@ -136,6 +136,16 @@ namespace IfcViewer.UI
                 //    mouseTarget = this Window (PreviewMouse tunnel fires before Helix)
                 _fpController = new FirstPersonController(_viewerHost.Camera, _viewport, this);
 
+                // Block WASD / arrow keys from reaching Helix's CameraController when
+                // walk mode is NOT active. Without this guard, any mouse click that gives
+                // the viewport focus lets Helix handle those keys internally, causing the
+                // camera to move even in normal orbit mode.
+                this.PreviewKeyDown += (s, ev) =>
+                {
+                    if (_fpController != null && !_fpController.IsActive && IsMovementKey(ev.Key))
+                        ev.Handled = true;
+                };
+
                 // 9. Section plane manager + attach its visual quad to the scene root
                 _sectionMgr = new SectionPlaneManager();
                 _sectionMgr.AttachVisual(_sceneRoot);
@@ -381,6 +391,13 @@ namespace IfcViewer.UI
         }
 
         // ── Walk mode ─────────────────────────────────────────────────────────
+
+        /// <summary>Keys that Helix's CameraController uses for movement — blocked in orbit mode.</summary>
+        private static bool IsMovementKey(Key k)
+            => k == Key.W || k == Key.A || k == Key.S || k == Key.D
+            || k == Key.Up || k == Key.Down || k == Key.Left || k == Key.Right
+            || k == Key.Q || k == Key.E || k == Key.PageUp || k == Key.PageDown;
+
         private void WalkMode_Checked(object sender, RoutedEventArgs e)
         {
             if (_fpController == null || _viewport == null) return;

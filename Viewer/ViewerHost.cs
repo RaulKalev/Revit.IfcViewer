@@ -43,7 +43,7 @@ namespace IfcViewer.Viewer
                 UpDirection     = DefaultUpDir,
                 FieldOfView     = 45,
                 NearPlaneDistance = 0.01,
-                FarPlaneDistance  = 5000
+                FarPlaneDistance  = double.PositiveInfinity
             };
 
             SessionLogger.Info("ViewerHost created — EffectsManager and Camera initialized.");

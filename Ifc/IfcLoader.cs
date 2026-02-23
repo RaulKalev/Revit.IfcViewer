@@ -2,11 +2,14 @@ using HelixToolkit.Wpf.SharpDX;
 using SharpDX;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Threading;
 using Xbim.Common;
 using Xbim.Common.Geometry;
+using Xbim.Common.XbimExtensions;   // BinaryReaderExtensions.ReadShapeTriangulation
 using Xbim.Ifc;
 using Xbim.ModelGeometry.Scene;
 
@@ -22,6 +25,12 @@ namespace IfcViewer.Ifc
     /// </summary>
     public static class IfcLoader
     {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool SetDllDirectory(string lpPathName);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr AddDllDirectory(string lpPathName);
+
         // ── Fallback colours by IFC product type ─────────────────────────────
         private static readonly XbimColour ColWall    = new XbimColour("Wall",   0.75f, 0.72f, 0.68f, 1f);
         private static readonly XbimColour ColSlab    = new XbimColour("Slab",   0.60f, 0.60f, 0.58f, 1f);
@@ -60,72 +69,135 @@ namespace IfcViewer.Ifc
             SessionLogger.Info("IfcLoader: opening '" + fileName + "'");
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
+            // Ensure Xbim.Geometry.Engine32/64.dll (unmanaged) is findable before ANY
+            // xBIM call. Must happen before IfcStore.Open — the engine is loaded lazily
+            // at first geometry operation, and SetDllDirectory only affects future loads.
+            string assemblyDir = Path.GetDirectoryName(typeof(IfcLoader).Assembly.Location);
+            if (!string.IsNullOrEmpty(assemblyDir))
+            {
+                SetDllDirectory(assemblyDir);
+                AddDllDirectory(assemblyDir);
+
+                // Also prepend to PATH so LoadLibrary's fallback search finds it.
+                string currentPath = Environment.GetEnvironmentVariable("PATH") ?? "";
+                if (currentPath.IndexOf(assemblyDir, StringComparison.OrdinalIgnoreCase) < 0)
+                    Environment.SetEnvironmentVariable("PATH", assemblyDir + ";" + currentPath);
+
+                bool eng32     = File.Exists(Path.Combine(assemblyDir, "Xbim.Geometry.Engine32.dll"));
+                bool eng64     = File.Exists(Path.Combine(assemblyDir, "Xbim.Geometry.Engine64.dll"));
+                bool interop   = File.Exists(Path.Combine(assemblyDir, "Xbim.Geometry.Engine.Interop.dll"));
+                bool esent     = File.Exists(Path.Combine(assemblyDir, "Xbim.IO.Esent.dll"));
+                bool esentInterop = File.Exists(Path.Combine(assemblyDir, "Esent.Interop.dll"));
+                SessionLogger.Info($"IfcLoader: DLL path → {assemblyDir}");
+                SessionLogger.Info($"  Engine32={eng32} Engine64={eng64} Interop={interop} Esent={esent} EsentInterop={esentInterop}");
+            }
+
             using (var model = IfcStore.Open(filePath))
             {
-                // Build or reuse the triangulation cache
+                SessionLogger.Info($"IfcLoader: model type={model.GetType().Name}  GeometryStore={model.GeometryStore?.GetType().Name ?? "null"}");
+
+                // Tessellate the model into the in-memory geometry store.
+                // Pass adjustWcs=false to keep the original coordinate system.
+                // null progress = no callbacks.
                 var context = new Xbim3DModelContext(model);
-                context.CreateContext();
+                bool contextOk = context.CreateContext(null, false);
+                SessionLogger.Info($"IfcLoader: CreateContext={contextOk}  instances={context.ShapeInstances().Count()}  geometries={context.ShapeGeometries().Count()}");
 
                 // Colour map: StyleLabel → XbimColour (surface styles defined in the file)
                 var colourMap = new XbimColourMap();
                 colourMap.SetProductTypeColourMap(); // seed with IFC type defaults
 
                 int meshCount = 0;
+                int diagTotal = 0, diagSkipped = 0, diagNoGeom = 0,
+                    diagInvalid = 0, diagThrew = 0, diagEmpty = 0;
 
                 // Bucket geometry by colour to reduce Helix draw calls.
                 // All work here is plain CLR types — safe on a background thread.
                 // Key = rounded RGBA, Value = (positions, normals, indices, isTransparent)
                 var buckets = new Dictionary<ColourKey, Bucket>();
 
-                foreach (XbimShapeInstance instance in context.ShapeInstances())
+                // Read tessellated geometry back from the store via IGeometryStoreReader.
+                // ShapeGeometryOfInstance returns IXbimShapeGeometryData whose ShapeData
+                // property is byte[] — the raw XbimShapeTriangulation binary blob written
+                // by CreateContext(). BinaryReaderExtensions.ReadShapeTriangulation() decodes
+                // it without invoking the native geometry engine again.
+                using (var storeReader = model.GeometryStore.BeginRead())
                 {
-                    // Skip unwanted product types
-                    if (ShouldSkip(instance, model)) continue;
-
-                    // Get the pre-tessellated geometry for this instance
-                    XbimShapeGeometry geom;
-                    try { geom = context.ShapeGeometry(instance); }
-                    catch { continue; }
-
-                    if (string.IsNullOrEmpty(geom.ShapeData)) continue;
-
-                    // Parse the triangulated mesh (applies the instance transform)
-                    var xMesh = new XbimMeshGeometry3D();
-                    try
+                    foreach (XbimShapeInstance instance in storeReader.ShapeInstances)
                     {
-                        xMesh.Read(geom.ShapeData,
-                                   (XbimMatrix3D?)instance.Transformation);
+                        diagTotal++;
+
+                        // Skip unwanted product types
+                        if (ShouldSkip(instance, model)) { diagSkipped++; continue; }
+
+                        // Get the raw byte[] blob from the store
+                        IXbimShapeGeometryData geomData;
+                        try
+                        {
+                            geomData = storeReader.ShapeGeometryOfInstance(instance);
+                        }
+                        catch { diagNoGeom++; continue; }
+
+                        if (geomData == null || geomData.ShapeData == null || geomData.ShapeData.Length == 0)
+                        { diagInvalid++; continue; }
+
+                        // Deserialize: byte[] → XbimShapeTriangulation (pure managed read)
+                        List<float[]> triPositions;
+                        List<int>     triIndices;
+                        try
+                        {
+                            XbimShapeTriangulation tri;
+                            using (var ms = new MemoryStream(geomData.ShapeData))
+                            using (var br = new BinaryReader(ms))
+                            {
+                                tri = br.ReadShapeTriangulation();
+                            }
+                            // Apply the instance world transform
+                            tri = tri.Transform(instance.Transformation);
+                            tri.ToPointsWithNormalsAndIndices(out triPositions, out triIndices);
+                        }
+                        catch (Exception ex)
+                        {
+                            diagThrew++;
+                            if (diagThrew <= 3) SessionLogger.Warn("Triangulate threw: " + ex.Message);
+                            continue;
+                        }
+
+                        if (triPositions == null || triPositions.Count == 0)
+                        { diagEmpty++; continue; }
+
+                        // Resolve colour for this shape instance
+                        XbimColour colour = ResolveColour(instance, model, colourMap);
+                        var key = new ColourKey(colour);
+
+                        if (!buckets.TryGetValue(key, out Bucket bucket))
+                        {
+                            bucket = new Bucket(colour.IsTransparent);
+                            buckets[key] = bucket;
+                        }
+
+                        int baseIdx = bucket.Positions.Count;
+
+                        // triPositions[i] = float[6]{ X, Y, Z, NX, NY, NZ } in IFC Z-up space.
+                        // Remap IFC Z-up → Helix Y-up: (X, Y, Z) → (X, Z, -Y)
+                        foreach (float[] v in triPositions)
+                        {
+                            bucket.Positions.Add(new Vector3(v[0],  v[2], -v[1]));
+                            bucket.Normals  .Add(new Vector3(v[3],  v[5], -v[4]));
+                        }
+
+                        foreach (int idx in triIndices)
+                            bucket.Indices.Add(baseIdx + idx);
+
+                        meshCount++;
                     }
-                    catch { continue; }
-
-                    if (xMesh.PositionCount == 0) continue;
-
-                    // Resolve colour for this shape instance
-                    XbimColour colour = ResolveColour(instance, model, colourMap);
-                    var key = new ColourKey(colour);
-
-                    if (!buckets.TryGetValue(key, out Bucket bucket))
-                    {
-                        bucket = new Bucket(colour.IsTransparent);
-                        buckets[key] = bucket;
-                    }
-
-                    int baseIdx = bucket.Positions.Count;
-
-                    // IFC uses Z-up; convert to Helix Y-up: (X, Y, Z) → (X, Z, -Y)
-                    foreach (XbimPoint3D p in xMesh.Positions)
-                        bucket.Positions.Add(new Vector3((float)p.X, (float)p.Z, -(float)p.Y));
-
-                    foreach (XbimVector3D n in xMesh.Normals)
-                        bucket.Normals.Add(new Vector3((float)n.X, (float)n.Z, -(float)n.Y));
-
-                    foreach (int i in xMesh.TriangleIndices)
-                        bucket.Indices.Add(baseIdx + i);
-
-                    meshCount++;
-                }
+                } // storeReader.Dispose()
 
                 sw.Stop();
+                SessionLogger.Info(
+                    $"IfcLoader: tessellation done in {sw.ElapsedMilliseconds} ms. " +
+                    $"total={diagTotal} skipped={diagSkipped} noGeom={diagNoGeom} " +
+                    $"invalid={diagInvalid} threw={diagThrew} emptyTri={diagEmpty} built={meshCount}");
                 SessionLogger.Info("IfcLoader: xBIM tessellation done — " + meshCount +
                                    " instances in " + sw.ElapsedMilliseconds + " ms." +
                                    " Building Helix scene on UI thread…");

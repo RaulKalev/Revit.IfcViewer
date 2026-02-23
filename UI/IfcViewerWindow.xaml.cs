@@ -86,7 +86,11 @@ namespace IfcViewer.UI
                     ShowFrameRate            = true,
                     // SSAO — ambient occlusion darkens corners and contact zones, making
                     // object shapes much easier to read in dense architectural models.
+                    // Sampling radius is in world units (metres); default is sub-metre
+                    // which is invisible at building scale — 1.5 m covers wall/floor corners.
                     EnableSSAO               = true,
+                    SSAOSamplingRadius       = 1.5,
+                    SSAOIntensity            = 1.5,
                     // MSAA off — pure technical viewer, FXAA is sufficient and costs ~0ms
                     MSAA                     = MSAALevel.Disable,
                     Background               = new System.Windows.Media.SolidColorBrush(

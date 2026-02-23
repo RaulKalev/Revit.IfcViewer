@@ -115,19 +115,25 @@ namespace IfcViewer.Viewer
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
             // ── Directional lights ──────────────────────────────────────────
+            // Sun: strong white from upper-left-front — primary key light.
             var sunLight = new DirectionalLight3D
             {
                 Direction = new Media3D.Vector3D(-1, -2, -1.5),
                 Color = Colors.White
             };
+            // Fill: reduced to 40% of previous brightness so the sun↔shadow
+            // gradient is steeper; slight blue tint differentiates it from the sun.
             var fillLight = new DirectionalLight3D
             {
                 Direction = new Media3D.Vector3D(1, 1, 0.5),
-                Color = System.Windows.Media.Color.FromRgb(80, 80, 120)
+                Color = System.Windows.Media.Color.FromRgb(35, 35, 50)
             };
+            // Ambient: lowered from 40 to 15 (≈6% of full range).
+            // With less ambient, surfaces pointing away from both lights are noticeably
+            // darker, giving strong face-to-face contrast and clear shape perception.
             var ambientLight = new AmbientLight3D
             {
-                Color = System.Windows.Media.Color.FromRgb(40, 40, 40)
+                Color = System.Windows.Media.Color.FromRgb(15, 15, 15)
             };
             sceneGroup.Children.Add(sunLight);
             sceneGroup.Children.Add(fillLight);

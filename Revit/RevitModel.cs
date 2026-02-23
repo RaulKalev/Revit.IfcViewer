@@ -1,11 +1,13 @@
+using Autodesk.Revit.DB;
 using HelixToolkit.Wpf.SharpDX;
 using SharpDX;
+using System.Collections.Generic;
 
 namespace IfcViewer.Revit
 {
     /// <summary>
     /// Lightweight result from a single Revit geometry export.
-    /// Holds the Helix GroupModel3D and metadata for display.
+    /// Holds the Helix GroupModel3D, per-element mesh map, and metadata for display.
     /// </summary>
     public sealed class RevitModel
     {
@@ -18,20 +20,29 @@ namespace IfcViewer.Revit
         /// <summary>Axis-aligned bounding box of all exported geometry.</summary>
         public BoundingBox Bounds { get; }
 
-        /// <summary>Number of mesh buckets (one per colour) in the scene.</summary>
+        /// <summary>Number of element meshes in the scene.</summary>
         public int MeshCount { get; }
 
         /// <summary>Total triangle count across all meshes.</summary>
         public int TriangleCount { get; }
 
+        /// <summary>
+        /// Maps each exported Revit ElementId to its Helix mesh.
+        /// Used for incremental updates — individual element meshes can be replaced
+        /// in-place without a full re-export.
+        /// </summary>
+        public IReadOnlyDictionary<ElementId, MeshGeometryModel3D> ElementMeshes { get; }
+
         public RevitModel(string displayName, GroupModel3D sceneGroup,
-                          BoundingBox bounds, int meshCount, int triangleCount)
+                          BoundingBox bounds, int meshCount, int triangleCount,
+                          IReadOnlyDictionary<ElementId, MeshGeometryModel3D> elementMeshes = null)
         {
-            DisplayName = displayName;
-            SceneGroup  = sceneGroup;
-            Bounds      = bounds;
-            MeshCount   = meshCount;
+            DisplayName   = displayName;
+            SceneGroup    = sceneGroup;
+            Bounds        = bounds;
+            MeshCount     = meshCount;
             TriangleCount = triangleCount;
+            ElementMeshes = elementMeshes ?? new Dictionary<ElementId, MeshGeometryModel3D>();
         }
 
         public override string ToString() => DisplayName;

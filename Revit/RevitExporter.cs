@@ -12,35 +12,31 @@ namespace IfcViewer.Revit
     /// Exports tessellated geometry from the active Revit 3D view using
     /// the Revit API's <see cref="CustomExporter"/> pipeline.
     ///
-    /// Threading: <see cref="Export"/> must be called on the Revit API thread
-    /// (i.e. inside an IExternalCommand or ExternalEvent). All Helix WPF objects
-    /// are then marshalled to <paramref name="uiDispatcher"/> so they are owned
-    /// by the WPF UI thread.
+    /// Each Revit element gets its own <see cref="MeshGeometryModel3D"/> (one mesh per
+    /// ElementId). This enables incremental updates via <see cref="ExportIncremental"/>:
+    /// only dirty (added/modified) elements are re-tessellated, and deleted elements
+    /// are removed directly from the live scene without a full re-export.
+    ///
+    /// Threading: <see cref="Export"/> / <see cref="ExportIncremental"/> must be called
+    /// on the Revit API thread. Helix WPF objects are marshalled to
+    /// <paramref name="uiDispatcher"/>.
     /// </summary>
     public static class RevitExporter
     {
         // ── Public API ───────────────────────────────────────────────────────
 
         /// <summary>
-        /// Tessellates <paramref name="view"/> and returns a <see cref="RevitModel"/>
-        /// whose <c>SceneGroup</c> is ready to add to <c>ViewerHost.RevitRoot</c>.
+        /// Full export — tessellates every visible element in <paramref name="view"/>.
         /// </summary>
-        /// <param name="doc">Active Revit document.</param>
-        /// <param name="view">3D view to export (must be a View3D).</param>
-        /// <param name="uiDispatcher">WPF dispatcher used to create Helix DependencyObjects.</param>
         public static RevitModel Export(Document doc, View3D view, Dispatcher uiDispatcher)
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
             SessionLogger.Info($"RevitExporter: exporting view '{view.Name}'");
 
-            var context = new RevitExportContext(doc);
-
-            // CustomExporter drives the geometry pipeline.
-            // includeFaces=false (we get triangulated meshes via OnPolymesh)
-            // includeLinearObjects=false
+            var context = new RevitExportContext(doc, filterIds: null);
             using (var exporter = new CustomExporter(doc, context))
             {
-                exporter.IncludeGeometricObjects = false; // suppress detail curves etc.
+                exporter.IncludeGeometricObjects = false;
                 exporter.ShouldStopOnError       = false;
                 exporter.Export(view);
             }
@@ -48,51 +44,65 @@ namespace IfcViewer.Revit
             sw.Stop();
             SessionLogger.Info(
                 $"RevitExporter: done in {sw.ElapsedMilliseconds} ms. " +
-                $"Buckets={context.Buckets.Count}  Faces={context.FaceCount}");
+                $"Elements={context.ElementBuckets.Count}  Faces={context.FaceCount}");
 
-            // ── Build Helix scene on the WPF UI thread ───────────────────────
             return uiDispatcher.Invoke(() => BuildScene(context, view.Name));
         }
 
-        // ── Scene builder (runs on UI thread) ────────────────────────────────
+        /// <summary>
+        /// Incremental export — re-tessellates only <paramref name="dirtyIds"/> and removes
+        /// <paramref name="deletedIds"/> from the live <paramref name="previous"/> scene.
+        /// Falls back to a full <see cref="Export"/> if <paramref name="previous"/> is null.
+        /// </summary>
+        public static RevitModel ExportIncremental(
+            Document        doc,
+            View3D          view,
+            ISet<ElementId> dirtyIds,
+            ISet<ElementId> deletedIds,
+            RevitModel      previous,
+            Dispatcher      uiDispatcher)
+        {
+            if (previous == null || dirtyIds == null)
+                return Export(doc, view, uiDispatcher);
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            SessionLogger.Info(
+                $"RevitExporter: incremental — dirty={dirtyIds.Count}  deleted={deletedIds?.Count ?? 0}");
+
+            // Export only dirty elements; the context skips all others via OnElementBegin.
+            var context = new RevitExportContext(doc, filterIds: dirtyIds);
+            using (var exporter = new CustomExporter(doc, context))
+            {
+                exporter.IncludeGeometricObjects = false;
+                exporter.ShouldStopOnError       = false;
+                exporter.Export(view);
+            }
+
+            sw.Stop();
+            SessionLogger.Info(
+                $"RevitExporter: incremental done in {sw.ElapsedMilliseconds} ms. " +
+                $"NewBuckets={context.ElementBuckets.Count}");
+
+            return uiDispatcher.Invoke(() => PatchScene(context, deletedIds, previous));
+        }
+
+        // ── Full scene builder (UI thread) ────────────────────────────────────
+
         private static RevitModel BuildScene(RevitExportContext ctx, string viewName)
         {
-            var sceneGroup = new GroupModel3D();
-            var allBounds  = new List<BoundingBox>();
-            int triCount   = 0;
+            var sceneGroup    = new GroupModel3D();
+            var allBounds     = new List<BoundingBox>();
+            var elementMeshes = new Dictionary<ElementId, MeshGeometryModel3D>();
+            int triCount      = 0;
 
-            foreach (var kv in ctx.Buckets)
+            foreach (var kv in ctx.ElementBuckets)
             {
                 var bucket = kv.Value;
                 if (bucket.Indices.Count == 0) continue;
 
-                var helixGeom = new MeshGeometry3D
-                {
-                    Positions = new Vector3Collection(bucket.Positions),
-                    Normals   = new Vector3Collection(bucket.Normals),
-                    Indices   = new IntCollection(bucket.Indices)
-                };
-
-                var mat = new PhongMaterial
-                {
-                    DiffuseColor      = kv.Key.ToColor4(),
-                    // Minimal specular — purely technical viewer
-                    SpecularColor     = new Color4(0.05f, 0.05f, 0.05f, 1f),
-                    SpecularShininess = 4f,
-                    ReflectiveColor   = new Color4(0f, 0f, 0f, 0f),
-                };
-
-                // Plain MeshGeometryModel3D — cheaper Blinn-Phong shader.
-                // SectionPlaneManager upgrades to CrossSectionMeshGeometryModel3D
-                // on-demand when the section tool is activated.
-                var mesh3d = new MeshGeometryModel3D
-                {
-                    Geometry      = helixGeom,
-                    Material      = mat,
-                    IsTransparent = kv.Key.Alpha < 0.99f,
-                };
-
+                var mesh3d = BucketToMesh(bucket);
                 sceneGroup.Children.Add(mesh3d);
+                elementMeshes[kv.Key] = mesh3d;
                 triCount += bucket.Indices.Count / 3;
 
                 if (bucket.Positions.Count > 0)
@@ -107,7 +117,101 @@ namespace IfcViewer.Revit
                 : new BoundingBox();
 
             SessionLogger.Info($"RevitExporter: {triCount} triangles — scene ready.");
-            return new RevitModel(viewName, sceneGroup, bounds, ctx.Buckets.Count, triCount);
+            return new RevitModel(viewName, sceneGroup, bounds,
+                elementMeshes.Count, triCount, elementMeshes);
+        }
+
+        // ── Incremental scene patcher (UI thread) ─────────────────────────────
+
+        private static RevitModel PatchScene(
+            RevitExportContext ctx,
+            ISet<ElementId>    deletedIds,
+            RevitModel         previous)
+        {
+            // Mutable copy of the element map — the SceneGroup is mutated in-place.
+            // Cast to IDictionary<,> for net48 compatibility (IReadOnlyDictionary copy
+            // constructor overload was added in .NET 8; IDictionary exists on all targets).
+            var elementMeshes = new Dictionary<ElementId, MeshGeometryModel3D>(
+                (IDictionary<ElementId, MeshGeometryModel3D>)previous.ElementMeshes);
+            var sceneGroup    = previous.SceneGroup;
+            int triCount      = previous.TriangleCount;
+
+            // 1. Remove deleted elements
+            if (deletedIds != null)
+            {
+                foreach (var id in deletedIds)
+                {
+                    if (!elementMeshes.TryGetValue(id, out var old)) continue;
+                    sceneGroup.Children.Remove(old);
+                    triCount -= old.Geometry?.Indices?.Count / 3 ?? 0;
+                    elementMeshes.Remove(id);
+                }
+            }
+
+            // 2. Replace / add dirty elements
+            foreach (var kv in ctx.ElementBuckets)
+            {
+                var bucket = kv.Value;
+                if (bucket.Indices.Count == 0) continue;
+
+                // Remove old mesh if present (element was modified)
+                if (elementMeshes.TryGetValue(kv.Key, out var existing))
+                {
+                    sceneGroup.Children.Remove(existing);
+                    triCount -= existing.Geometry?.Indices?.Count / 3 ?? 0;
+                    elementMeshes.Remove(kv.Key);
+                }
+
+                var newMesh = BucketToMesh(bucket);
+                sceneGroup.Children.Add(newMesh);
+                elementMeshes[kv.Key] = newMesh;
+                triCount += bucket.Indices.Count / 3;
+            }
+
+            // Recalculate bounds from all surviving meshes
+            var allBounds = new List<BoundingBox>();
+            foreach (var mesh in elementMeshes.Values)
+            {
+                if (mesh.Geometry?.Positions?.Count > 0)
+                {
+                    BoundingBox.FromPoints(mesh.Geometry.Positions.ToArray(), out BoundingBox b);
+                    allBounds.Add(b);
+                }
+            }
+
+            BoundingBox bounds = allBounds.Count > 0
+                ? allBounds.Aggregate(BoundingBox.Merge)
+                : previous.Bounds;
+
+            return new RevitModel(previous.DisplayName, sceneGroup, bounds,
+                elementMeshes.Count, triCount, elementMeshes);
+        }
+
+        // ── Shared mesh factory ───────────────────────────────────────────────
+
+        private static MeshGeometryModel3D BucketToMesh(ElementBucket bucket)
+        {
+            var helixGeom = new MeshGeometry3D
+            {
+                Positions = new Vector3Collection(bucket.Positions),
+                Normals   = new Vector3Collection(bucket.Normals),
+                Indices   = new IntCollection(bucket.Indices),
+            };
+
+            var mat = new PhongMaterial
+            {
+                DiffuseColor      = bucket.Colour,
+                SpecularColor     = new Color4(0.05f, 0.05f, 0.05f, 1f),
+                SpecularShininess = 4f,
+                ReflectiveColor   = new Color4(0f, 0f, 0f, 0f),
+            };
+
+            return new MeshGeometryModel3D
+            {
+                Geometry      = helixGeom,
+                Material      = mat,
+                IsTransparent = bucket.Colour.Alpha < 0.99f,
+            };
         }
     }
 
@@ -116,26 +220,30 @@ namespace IfcViewer.Revit
     internal sealed class RevitExportContext : IExportContext
     {
         // ── Output ───────────────────────────────────────────────────────────
-        public readonly Dictionary<ColourKey, Bucket> Buckets = new Dictionary<ColourKey, Bucket>();
+        public readonly Dictionary<ElementId, ElementBucket> ElementBuckets
+            = new Dictionary<ElementId, ElementBucket>();
         public int FaceCount { get; private set; }
 
         // ── Per-element state ────────────────────────────────────────────────
-        private readonly Document _doc;
+        private readonly Document        _doc;
+        private readonly ISet<ElementId> _filterIds; // null = export all
         private readonly Stack<Transform> _transformStack = new Stack<Transform>();
-        private Color4 _currentColor = new Color4(0.7f, 0.7f, 0.7f, 1f);
-        private bool _skipElement;
+        private Color4    _currentColor     = new Color4(0.7f, 0.7f, 0.7f, 1f);
+        private bool      _skipElement;
+        private ElementId _currentElementId = ElementId.InvalidElementId;
 
-        // Category filter: skip non-3D annotation categories
-        private static readonly HashSet<BuiltInCategory> SkippedCategories = new HashSet<BuiltInCategory>
+        private static readonly HashSet<BuiltInCategory> SkippedCategories
+            = new HashSet<BuiltInCategory>
         {
             BuiltInCategory.OST_Cameras,
             BuiltInCategory.OST_RenderRegions,
             BuiltInCategory.OST_SectionBox,
         };
 
-        public RevitExportContext(Document doc)
+        public RevitExportContext(Document doc, ISet<ElementId> filterIds)
         {
-            _doc = doc;
+            _doc       = doc;
+            _filterIds = filterIds;
         }
 
         // ── IExportContext lifecycle ──────────────────────────────────────────
@@ -153,23 +261,26 @@ namespace IfcViewer.Revit
 
         // ── View ─────────────────────────────────────────────────────────────
 
-        public RenderNodeAction OnViewBegin(ViewNode node)
-        {
-            return RenderNodeAction.Proceed;
-        }
-
+        public RenderNodeAction OnViewBegin(ViewNode node) => RenderNodeAction.Proceed;
         public void OnViewEnd(ElementId elementId) { }
 
         // ── Element ──────────────────────────────────────────────────────────
 
         public RenderNodeAction OnElementBegin(ElementId elementId)
         {
-            _skipElement = false;
+            _skipElement      = false;
+            _currentElementId = elementId;
+
+            // Incremental filter: skip elements not in the dirty set
+            if (_filterIds != null && !_filterIds.Contains(elementId))
+            {
+                _skipElement = true;
+                return RenderNodeAction.Skip;
+            }
 
             Element elem = _doc.GetElement(elementId);
             if (elem == null) { _skipElement = true; return RenderNodeAction.Skip; }
 
-            // Skip non-solid categories
             if (elem.Category != null)
             {
                 try
@@ -181,17 +292,13 @@ namespace IfcViewer.Revit
                 catch { /* non-built-in category — proceed */ }
             }
 
-            // Default colour from category material
             _currentColor = CategoryToColor(elem);
             return RenderNodeAction.Proceed;
         }
 
-        public void OnElementEnd(ElementId elementId)
-        {
-            _skipElement = false;
-        }
+        public void OnElementEnd(ElementId elementId) { _skipElement = false; }
 
-        // ── Instances (linked models, families) ───────────────────────────────
+        // ── Instances / links ─────────────────────────────────────────────────
 
         public RenderNodeAction OnInstanceBegin(InstanceNode node)
         {
@@ -203,8 +310,6 @@ namespace IfcViewer.Revit
         {
             if (_transformStack.Count > 1) _transformStack.Pop();
         }
-
-        // ── Link ─────────────────────────────────────────────────────────────
 
         public RenderNodeAction OnLinkBegin(LinkNode node)
         {
@@ -219,14 +324,8 @@ namespace IfcViewer.Revit
 
         // ── Face / material ───────────────────────────────────────────────────
 
-        public RenderNodeAction OnFaceBegin(FaceNode node)
-        {
-            return RenderNodeAction.Proceed;
-        }
-
+        public RenderNodeAction OnFaceBegin(FaceNode node) => RenderNodeAction.Proceed;
         public void OnFaceEnd(FaceNode node) { }
-
-        // ── Material ─────────────────────────────────────────────────────────
 
         public void OnMaterial(MaterialNode node)
         {
@@ -236,7 +335,6 @@ namespace IfcViewer.Revit
             float g = (float)(node.Color.Green / 255.0);
             float b = (float)(node.Color.Blue  / 255.0);
             float a = (float)(1.0 - node.Transparency);
-
             _currentColor = new Color4(r, g, b, a);
         }
 
@@ -246,20 +344,22 @@ namespace IfcViewer.Revit
         {
             if (_skipElement) return;
 
-            var pts   = polymesh.GetPoints();
-            var norms = polymesh.GetNormals();
+            var pts    = polymesh.GetPoints();
+            var norms  = polymesh.GetNormals();
             var facets = polymesh.GetFacets();
 
             Transform xform = CurrentTransform;
-            var key    = new ColourKey(_currentColor);
 
-            if (!Buckets.TryGetValue(key, out Bucket bucket))
+            if (!ElementBuckets.TryGetValue(_currentElementId, out ElementBucket bucket))
             {
-                bucket = new Bucket();
-                Buckets[key] = bucket;
+                bucket = new ElementBucket { Colour = _currentColor };
+                ElementBuckets[_currentElementId] = bucket;
             }
 
-            int baseIdx = bucket.Positions.Count;
+            // Colour is updated to the most recently seen material on this element.
+            bucket.Colour = _currentColor;
+
+            int  baseIdx    = bucket.Positions.Count;
             bool hasNormals = norms != null && norms.Count == pts.Count;
 
             // Revit uses feet internally; convert to metres (* 0.3048) then
@@ -268,8 +368,7 @@ namespace IfcViewer.Revit
 
             for (int i = 0; i < pts.Count; i++)
             {
-                var p = pts[i];
-                XYZ tp = xform.OfPoint(p);
+                XYZ tp = xform.OfPoint(pts[i]);
                 bucket.Positions.Add(new Vector3(
                     (float)tp.X * FT_TO_M,
                     (float)tp.Z * FT_TO_M,
@@ -277,12 +376,8 @@ namespace IfcViewer.Revit
 
                 if (hasNormals)
                 {
-                    var n = norms[i];
-                    XYZ tn = xform.OfVector(n).Normalize();
-                    bucket.Normals.Add(new Vector3(
-                        (float)tn.X,
-                        (float)tn.Z,
-                       -(float)tn.Y));
+                    XYZ tn = xform.OfVector(norms[i]).Normalize();
+                    bucket.Normals.Add(new Vector3((float)tn.X, (float)tn.Z, -(float)tn.Y));
                 }
                 else
                 {
@@ -325,7 +420,6 @@ namespace IfcViewer.Revit
             }
             catch { /* ignore */ }
 
-            // Very rough fallback by built-in category
             if (elem.Category != null)
             {
                 try
@@ -352,50 +446,13 @@ namespace IfcViewer.Revit
         }
     }
 
-    // ── Supporting types ──────────────────────────────────────────────────────
+    // ── Supporting type ───────────────────────────────────────────────────────
 
-    internal sealed class Bucket
+    internal sealed class ElementBucket
     {
+        public Color4 Colour;
         public readonly List<Vector3> Positions = new List<Vector3>();
         public readonly List<Vector3> Normals   = new List<Vector3>();
         public readonly List<int>     Indices   = new List<int>();
-    }
-
-    internal readonly struct ColourKey : IEquatable<ColourKey>
-    {
-        private readonly float _r, _g, _b, _a;
-
-        public float Alpha => _a;
-
-        public ColourKey(Color4 c)
-        {
-            _r = Round(c.Red);
-            _g = Round(c.Green);
-            _b = Round(c.Blue);
-            _a = Round(c.Alpha);
-        }
-
-        private static float Round(float v) => (float)Math.Round(v, 2);
-
-        public Color4 ToColor4() => new Color4(_r, _g, _b, _a);
-
-        public bool Equals(ColourKey other)
-            => _r == other._r && _g == other._g && _b == other._b && _a == other._a;
-
-        public override bool Equals(object obj)
-            => obj is ColourKey ck && Equals(ck);
-
-        public override int GetHashCode()
-        {
-            unchecked
-            {
-                int h = 17;
-                h = h * 31 + _r.GetHashCode();
-                h = h * 31 + _g.GetHashCode();
-                h = h * 31 + _b.GetHashCode();
-                h = h * 31 + _a.GetHashCode();
-                return h;
-            }
-        }
     }
 }

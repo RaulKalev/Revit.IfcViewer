@@ -135,9 +135,18 @@
                                 Click="SyncRevit_Click"
                                 Style="{StaticResource CustomActionButtonStyle}"
                                 Width="32" Height="32" Margin="0,0,6,0"
-                                ToolTip="Sync active Revit 3D view">
+                                ToolTip="Sync active Revit 3D view (full export)">
                             <materialDesign:PackIcon Kind="Sync" Width="20" Height="20"/>
                         </Button>
+                        <!-- Auto-sync toggle: watches DocumentChanged and incrementally updates dirty elements -->
+                        <ToggleButton x:Name="AutoSyncToggle"
+                                      Checked="AutoSync_Checked"
+                                      Unchecked="AutoSync_Unchecked"
+                                      Width="32" Height="32" Margin="0,0,6,0"
+                                      ToolTip="Auto-sync Revit geometry — updates incrementally on every model change"
+                                      Style="{StaticResource CustomActionToggleButtonStyle}">
+                            <materialDesign:PackIcon Kind="SyncAlert" Width="20" Height="20"/>
+                        </ToggleButton>
                         <Separator Width="1" Margin="4,4" Background="{DynamicResource BorderBrush}"/>
                         <Button x:Name="ResetCameraButton"
                                 Click="ResetCamera_Click"
@@ -293,6 +302,34 @@
                          assembly resolver fires; no Helix types in XAML. -->
                     <Grid Grid.Column="2" x:Name="ViewportContainer" ClipToBounds="True"
                           Background="#FF1A1A1A">
+
+                        <!-- IFC file-change notification banner -->
+                        <Border x:Name="ReloadBanner"
+                                Visibility="Collapsed"
+                                HorizontalAlignment="Center" VerticalAlignment="Top"
+                                Background="#CC1F1F1F"
+                                BorderBrush="#FF444444" BorderThickness="1"
+                                CornerRadius="4" Padding="10,6" Margin="0,8,0,0"
+                                Panel.ZIndex="20" IsHitTestVisible="True">
+                            <StackPanel Orientation="Horizontal">
+                                <materialDesign:PackIcon Kind="FileAlert" Width="16" Height="16"
+                                                         Foreground="#FFAAAAAA"
+                                                         VerticalAlignment="Center"
+                                                         Margin="0,0,6,0"/>
+                                <TextBlock x:Name="ReloadBannerText"
+                                           Foreground="#FFEEEEEE" FontSize="11"
+                                           VerticalAlignment="Center" Margin="0,0,10,0"/>
+                                <Button x:Name="ReloadBannerButton"
+                                        Content="Reload"
+                                        Style="{StaticResource CustomActionButtonStyle}"
+                                        Height="22" Padding="8,0"
+                                        Click="ReloadBannerButton_Click"/>
+                                <Button Content="✕"
+                                        Style="{StaticResource CustomActionButtonStyle}"
+                                        Height="22" Width="22" Margin="4,0,0,0"
+                                        Click="ReloadBannerDismiss_Click"/>
+                            </StackPanel>
+                        </Border>
 
                         <!-- Status overlay -->
                         <Border HorizontalAlignment="Right"

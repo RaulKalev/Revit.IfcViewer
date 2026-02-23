@@ -5,6 +5,7 @@ using IfcViewer.Revit;
 using IfcViewer.Viewer;
 using Microsoft.Win32;
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Runtime.InteropServices;
 using System.Windows;
@@ -52,6 +53,11 @@ namespace IfcViewer.UI
         private FirstPersonController _fpController;
         private SectionPlaneManager   _sectionMgr;
         private ViewerSettings        _settings;
+
+        // Stage 4: IFC file watchers + reload banner
+        private readonly Dictionary<string, IfcFileWatcher> _fileWatchers
+            = new Dictionary<string, IfcFileWatcher>(StringComparer.OrdinalIgnoreCase);
+        private IfcModel _pendingReload;
 
         // ── Constructor ───────────────────────────────────────────────────────
         public IfcViewerWindow(UIApplication uiApp)
@@ -184,6 +190,11 @@ namespace IfcViewer.UI
         {
             try
             {
+                // Stop auto-sync and dispose file watchers before tearing down the scene.
+                _syncRevitEvent?.StopAutoSync();
+                foreach (var w in _fileWatchers.Values) w.Dispose();
+                _fileWatchers.Clear();
+
                 this.PreviewMouseWheel -= OnPreviewMouseWheel;
                 _fpController?.Dispose();
                 _sectionMgr?.DetachVisual();
@@ -254,6 +265,11 @@ namespace IfcViewer.UI
                     // Fit camera to the loaded geometry
                     _viewerHost.FitView(ifcModel.Bounds);
 
+                    // Watch the file for external changes (e.g. re-export from Revit)
+                    var watcher = new IfcFileWatcher(path,
+                        () => Dispatcher.BeginInvoke((Action)(() => ShowReloadBanner(path))));
+                    _fileWatchers[path] = watcher;
+
                     UpdateStatus(ifcModel.DisplayName + "  |  " +
                                  ifcModel.MeshCount + " elements  |  " +
                                  ifcModel.TriangleCount + " triangles");
@@ -279,6 +295,21 @@ namespace IfcViewer.UI
         {
             if (!(ModelListBox.SelectedItem is IfcModel selected)) return;
 
+            // Dispose file watcher for this path
+            if (_fileWatchers.TryGetValue(selected.FilePath, out var watcher))
+            {
+                watcher.Dispose();
+                _fileWatchers.Remove(selected.FilePath);
+            }
+
+            // Clear pending reload if it was for this model
+            if (_pendingReload != null &&
+                string.Equals(_pendingReload.FilePath, selected.FilePath, StringComparison.OrdinalIgnoreCase))
+            {
+                _pendingReload = null;
+                ReloadBanner.Visibility = Visibility.Collapsed;
+            }
+
             // Remove from scene
             _sectionMgr?.UnregisterGroup(selected.SceneGroup);
             _viewerHost.IfcRoot.Children.Remove(selected.SceneGroup);
@@ -294,32 +325,14 @@ namespace IfcViewer.UI
         {
             if (_syncRevitEvent == null) return;
 
-            // Disable the button while export runs
             SyncRevitButton.IsEnabled = false;
             UpdateStatus("Exporting Revit geometry…");
 
             _syncRevitEvent.Request(
                 onComplete: model =>
                 {
-                    // Remove any previously exported Revit geometry
-                    if (_revitModel != null)
-                    {
-                        _sectionMgr?.UnregisterGroup(_revitModel.SceneGroup);
-                        _viewerHost.RevitRoot.Children.Remove(_revitModel.SceneGroup);
-                    }
-
-                    _revitModel = model;
-                    _viewerHost.RevitRoot.Children.Add(model.SceneGroup);
-                    _sectionMgr?.RegisterGroup(model.SceneGroup);
-                    UpdateSectionBounds();
-
-                    // If no IFC is loaded, fit camera to Revit geometry
-                    if (_loadedModels.Count == 0)
-                        _viewerHost.FitView(model.Bounds);
-
+                    ApplyRevitUpdate(model, fitCamera: _revitModel == null && _loadedModels.Count == 0);
                     SyncRevitButton.IsEnabled = true;
-                    UpdateStatus($"Revit: {model.DisplayName}  |  {model.MeshCount} materials  |  {model.TriangleCount} triangles");
-                    SessionLogger.Info($"Revit sync complete: {model.TriangleCount} triangles");
                 },
                 onError: ex =>
                 {
@@ -330,6 +343,163 @@ namespace IfcViewer.UI
                         "Revit Export Error", MessageBoxButton.OK, MessageBoxImage.Error);
                     SessionLogger.Error("Revit export failed.", ex);
                 });
+        }
+
+        // ── Auto-sync ─────────────────────────────────────────────────────────
+
+        private void AutoSync_Checked(object sender, RoutedEventArgs e)
+        {
+            if (_syncRevitEvent == null) return;
+
+            SyncRevitButton.IsEnabled = false;
+            UpdateStatus("Auto-sync: initial export…");
+
+            _syncRevitEvent.StartAutoSync(
+                onUpdate: model => ApplyRevitUpdate(model,
+                    fitCamera: _revitModel == null && _loadedModels.Count == 0),
+                onError: ex =>
+                {
+                    if (AutoSyncToggle != null) AutoSyncToggle.IsChecked = false;
+                    SyncRevitButton.IsEnabled = true;
+                    UpdateStatus("Auto-sync error — see log.");
+                    MessageBox.Show(this,
+                        "Auto-sync failed:\n\n" + ex.Message,
+                        "Auto-sync Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                    SessionLogger.Error("Auto-sync failed.", ex);
+                });
+        }
+
+        private void AutoSync_Unchecked(object sender, RoutedEventArgs e)
+        {
+            _syncRevitEvent?.StopAutoSync();
+            SyncRevitButton.IsEnabled = true;
+            UpdateStatus("Auto-sync stopped.");
+            SessionLogger.Info("Auto-sync deactivated.");
+        }
+
+        /// <summary>
+        /// Applies a new or incrementally-updated <see cref="RevitModel"/> to the scene.
+        /// Handles full replacement (new SceneGroup) and in-place incremental patch
+        /// (same SceneGroup object mutated by PatchScene).
+        /// </summary>
+        private void ApplyRevitUpdate(RevitModel model, bool fitCamera = false)
+        {
+            if (_revitModel != null)
+            {
+                // Unregister all currently tracked Revit meshes.
+                _sectionMgr?.UnregisterGroup(_revitModel.SceneGroup);
+
+                // Remove stale SectionPlaneManager entries for meshes that were removed
+                // in-place by PatchScene (they are no longer in SceneGroup.Children).
+                _sectionMgr?.PruneDetachedEntries();
+
+                if (!ReferenceEquals(_revitModel.SceneGroup, model.SceneGroup))
+                {
+                    // Full replacement — swap the SceneGroup in RevitRoot.
+                    _viewerHost.RevitRoot.Children.Remove(_revitModel.SceneGroup);
+                    _viewerHost.RevitRoot.Children.Add(model.SceneGroup);
+                }
+                // else: incremental — same SceneGroup mutated in-place by PatchScene; already live.
+            }
+            else
+            {
+                // First sync — add to scene.
+                _viewerHost.RevitRoot.Children.Add(model.SceneGroup);
+            }
+
+            _revitModel = model;
+            _sectionMgr?.RegisterGroup(_revitModel.SceneGroup);
+            UpdateSectionBounds();
+
+            if (fitCamera) _viewerHost.FitView(model.Bounds);
+
+            UpdateStatus($"Revit: {model.DisplayName}  |  {model.MeshCount} elements  |  {model.TriangleCount} triangles");
+            SessionLogger.Info($"Revit update applied: {model.TriangleCount} triangles");
+        }
+
+        // ── IFC reload banner ─────────────────────────────────────────────────
+
+        private void ShowReloadBanner(string path)
+        {
+            // Find the model currently loaded from this path
+            IfcModel target = null;
+            foreach (var m in _loadedModels)
+                if (string.Equals(m.FilePath, path, StringComparison.OrdinalIgnoreCase))
+                { target = m; break; }
+            if (target == null) return;
+
+            _pendingReload          = target;
+            ReloadBannerText.Text   = System.IO.Path.GetFileName(path) + " changed on disk";
+            ReloadBanner.Visibility = Visibility.Visible;
+        }
+
+        private async void ReloadBannerButton_Click(object sender, RoutedEventArgs e)
+        {
+            ReloadBanner.Visibility = Visibility.Collapsed;
+            var model = _pendingReload;
+            _pendingReload = null;
+            if (model == null) return;
+
+            string path = model.FilePath;
+
+            // Remove the old model from the scene
+            _sectionMgr?.UnregisterGroup(model.SceneGroup);
+            _viewerHost.IfcRoot.Children.Remove(model.SceneGroup);
+            _loadedModels.Remove(model);
+
+            // Dispose and recreate the watcher (file may have moved/been recreated)
+            if (_fileWatchers.TryGetValue(path, out var oldWatcher))
+            {
+                oldWatcher.Dispose();
+                _fileWatchers.Remove(path);
+            }
+
+            AddIfcButton.IsEnabled    = false;
+            RemoveIfcButton.IsEnabled = false;
+            UpdateStatus("Reloading: " + System.IO.Path.GetFileName(path) + " …");
+
+            try
+            {
+                IfcModel newModel = await IfcLoader.LoadAsync(path, Dispatcher,
+                    onProgress: msg => UpdateStatus(msg));
+
+                _viewerHost.IfcRoot.Children.Add(newModel.SceneGroup);
+                _loadedModels.Add(newModel);
+                ModelListBox.SelectedItem = newModel;
+
+                _sectionMgr?.RegisterGroup(newModel.SceneGroup);
+                UpdateSectionBounds();
+                _viewerHost.FitView(newModel.Bounds);
+
+                // Restart the watcher for the reloaded path
+                var newWatcher = new IfcFileWatcher(path,
+                    () => Dispatcher.BeginInvoke((Action)(() => ShowReloadBanner(path))));
+                _fileWatchers[path] = newWatcher;
+
+                UpdateStatus(newModel.DisplayName + "  |  " +
+                             newModel.MeshCount + " elements  |  " +
+                             newModel.TriangleCount + " triangles");
+                SessionLogger.Info("Reloaded: " + newModel.DisplayName);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this,
+                    "Failed to reload IFC file:\n\n" + ex.Message,
+                    "Reload Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                SessionLogger.Error("IFC reload failed: " + path, ex);
+                UpdateStatus("Reload failed — see log.");
+            }
+            finally
+            {
+                AddIfcButton.IsEnabled    = true;
+                RemoveIfcButton.IsEnabled = true;
+            }
+        }
+
+        private void ReloadBannerDismiss_Click(object sender, RoutedEventArgs e)
+        {
+            ReloadBanner.Visibility = Visibility.Collapsed;
+            _pendingReload = null;
         }
 
         private void ResetCamera_Click(object sender, RoutedEventArgs e)

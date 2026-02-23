@@ -189,6 +189,22 @@ namespace IfcViewer.Viewer
             }
         }
 
+        /// <summary>
+        /// Removes all entries whose <c>LiveMesh</c> is no longer a child of its
+        /// registered parent group. Call this after an incremental scene patch to clean
+        /// up stale references for meshes that were silently removed by
+        /// <c>RevitExporter.PatchScene</c>.
+        /// </summary>
+        public void PruneDetachedEntries()
+        {
+            for (int i = _entries.Count - 1; i >= 0; i--)
+            {
+                var e = _entries[i];
+                if (!e.Parent.Children.Contains(e.LiveMesh))
+                    _entries.RemoveAt(i);
+            }
+        }
+
         // ── Upgrade / Downgrade ───────────────────────────────────────────────
 
         private void UpgradeAll()

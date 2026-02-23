@@ -116,7 +116,8 @@ namespace IfcViewer.UI
 
         private void UpdateApplyButtonState()
         {
-            ApplyButton.IsEnabled = _hasChanges;
+            if (ApplyButton != null)
+                ApplyButton.IsEnabled = _hasChanges;
         }
 
         // ── Reset ─────────────────────────────────────────────────────────────

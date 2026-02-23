@@ -103,6 +103,12 @@ namespace IfcViewer.Ifc
                 bool contextOk = context.CreateContext(null, false);
                 SessionLogger.Info($"IfcLoader: CreateContext={contextOk}  instances={context.ShapeInstances().Count()}  geometries={context.ShapeGeometries().Count()}");
 
+                // Unit scale: IFC internal units → metres.
+                // model.ModelFactors.OneMetre = number of IFC length units per metre
+                // (e.g. 1000 for millimetres, 1 for metres).
+                float toMetres = (float)(1.0 / model.ModelFactors.OneMetre);
+                SessionLogger.Info($"IfcLoader: OneMetre={model.ModelFactors.OneMetre}  toMetres={toMetres:F6}");
+
                 // Colour map: StyleLabel → XbimColour (surface styles defined in the file)
                 var colourMap = new XbimColourMap();
                 colourMap.SetProductTypeColourMap(); // seed with IFC type defaults
@@ -178,11 +184,12 @@ namespace IfcViewer.Ifc
 
                         int baseIdx = bucket.Positions.Count;
 
-                        // triPositions[i] = float[6]{ X, Y, Z, NX, NY, NZ } in IFC Z-up space.
+                        // triPositions[i] = float[6]{ X, Y, Z, NX, NY, NZ } in IFC internal units, Z-up.
                         // Remap IFC Z-up → Helix Y-up: (X, Y, Z) → (X, Z, -Y)
+                        // Scale positions by toMetres so the scene is in metres (matching Revit export).
                         foreach (float[] v in triPositions)
                         {
-                            bucket.Positions.Add(new Vector3(v[0],  v[2], -v[1]));
+                            bucket.Positions.Add(new Vector3(v[0] * toMetres,  v[2] * toMetres, -v[1] * toMetres));
                             bucket.Normals  .Add(new Vector3(v[3],  v[5], -v[4]));
                         }
 

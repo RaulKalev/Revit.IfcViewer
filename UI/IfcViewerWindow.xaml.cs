@@ -76,10 +76,12 @@ namespace IfcViewer.UI
                     ShowCoordinateSystem     = false,
                     ShowFrameRate            = true,
                     EnableSSAO               = false,
-                    MSAA                     = MSAALevel.Four,
+                    // MSAA off — pure technical viewer, FXAA is sufficient and costs ~0ms
+                    MSAA                     = MSAALevel.Disable,
                     Background               = new System.Windows.Media.SolidColorBrush(
                                                   System.Windows.Media.Color.FromRgb(26, 26, 26)),
-                    FXAALevel                = FXAALevel.Low,
+                    // FXAA Medium replaces MSAA — single post-process pass, near-free
+                    FXAALevel                = FXAALevel.Medium,
                     // Camera controller needs focus to receive mouse/keyboard input
                     Focusable                = true,
                     IsTabStop                = true,
@@ -88,6 +90,8 @@ namespace IfcViewer.UI
                     CameraMode               = CameraMode.Inspect,
                     // Disable default bindings so we can install our own below
                     UseDefaultGestures       = false,
+                    // Shadows off — pure technical viewer
+                    IsShadowMappingEnabled   = false,
                 };
 
                 // 3. Scene root
@@ -227,7 +231,8 @@ namespace IfcViewer.UI
 
                 try
                 {
-                    IfcModel ifcModel = await IfcLoader.LoadAsync(path, Dispatcher);
+                    IfcModel ifcModel = await IfcLoader.LoadAsync(path, Dispatcher,
+                        onProgress: msg => UpdateStatus(msg));
 
                     // Attach to scene on UI thread
                     _viewerHost.IfcRoot.Children.Add(ifcModel.SceneGroup);

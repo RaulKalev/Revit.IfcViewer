@@ -38,12 +38,15 @@ namespace IfcViewer.Viewer
 
             Camera = new PerspectiveCamera
             {
-                Position        = DefaultPosition,
-                LookDirection   = DefaultLookDir,
-                UpDirection     = DefaultUpDir,
-                FieldOfView     = 45,
+                Position          = DefaultPosition,
+                LookDirection     = DefaultLookDir,
+                UpDirection       = DefaultUpDir,
+                FieldOfView       = 45,
                 NearPlaneDistance = 0.01,
-                FarPlaneDistance  = double.PositiveInfinity
+                // Use a large but finite far plane. Infinity causes depth-buffer
+                // precision loss and defeats GPU early-Z rejection.
+                // Updated to scene-diagonal * 3 after geometry loads via FitView().
+                FarPlaneDistance  = 5000.0
             };
 
             SessionLogger.Info("ViewerHost created — EffectsManager and Camera initialized.");
@@ -97,7 +100,12 @@ namespace IfcViewer.Viewer
                 DefaultUpDir,
                 400);
 
-            SessionLogger.Info($"FitView — center ({center.X:F1},{center.Y:F1},{center.Z:F1})  radius {radius:F1}");
+            // Set far plane to scene diagonal * 3 so depth buffer precision is
+            // maximised while still covering the full scene from any view angle.
+            double diagonal = (box.Maximum - box.Minimum).Length();
+            Camera.FarPlaneDistance = Math.Max(500.0, diagonal * 3.0);
+
+            SessionLogger.Info($"FitView — center ({center.X:F1},{center.Y:F1},{center.Z:F1})  radius {radius:F1}  farPlane {Camera.FarPlaneDistance:F0}");
         }
 
         // ── Scene helpers ────────────────────────────────────────────────────

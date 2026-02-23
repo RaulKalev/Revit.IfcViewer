@@ -76,13 +76,16 @@ namespace IfcViewer.Revit
                 var mat = new PhongMaterial
                 {
                     DiffuseColor      = kv.Key.ToColor4(),
-                    SpecularColor     = new Color4(0.15f, 0.15f, 0.15f, 1f),
-                    SpecularShininess = 12f,
+                    // Minimal specular — purely technical viewer
+                    SpecularColor     = new Color4(0.05f, 0.05f, 0.05f, 1f),
+                    SpecularShininess = 4f,
+                    ReflectiveColor   = new Color4(0f, 0f, 0f, 0f),
                 };
 
-                // CrossSectionMeshGeometryModel3D extends MeshGeometryModel3D and
-                // exposes Plane1..8 for the section-plane tool.
-                var mesh3d = new CrossSectionMeshGeometryModel3D
+                // Plain MeshGeometryModel3D — cheaper Blinn-Phong shader.
+                // SectionPlaneManager upgrades to CrossSectionMeshGeometryModel3D
+                // on-demand when the section tool is activated.
+                var mesh3d = new MeshGeometryModel3D
                 {
                     Geometry      = helixGeom,
                     Material      = mat,

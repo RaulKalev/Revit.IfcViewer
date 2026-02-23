@@ -4,7 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Input;
-using System.Windows.Threading;
+using System.Windows.Media;
 using Media3D = System.Windows.Media.Media3D;
 
 namespace IfcViewer.Viewer
@@ -36,7 +36,8 @@ namespace IfcViewer.Viewer
         private readonly UIElement         _mouseTarget; // window  — mouse Preview (fires before Helix)
 
         // ── State ────────────────────────────────────────────────────────────
-        private readonly DispatcherTimer        _timer;
+        // CompositionTarget.Rendering fires exactly once per render frame — no
+        // timer drift, no queued-up ticks when the frame is slow.
         private readonly HashSet<Key>           _keysDown = new HashSet<Key>();
         private          DateTime               _lastTick;
         private          bool                   _active;
@@ -64,12 +65,6 @@ namespace IfcViewer.Viewer
             _camera      = camera      ?? throw new ArgumentNullException(nameof(camera));
             _keyTarget   = keyTarget   ?? throw new ArgumentNullException(nameof(keyTarget));
             _mouseTarget = mouseTarget ?? keyTarget; // fall back to viewport if not supplied
-
-            _timer = new DispatcherTimer(DispatcherPriority.Render)
-            {
-                Interval = TimeSpan.FromMilliseconds(16) // ~60 fps
-            };
-            _timer.Tick += OnTick;
         }
 
         // ── Public API ───────────────────────────────────────────────────────
@@ -98,7 +93,9 @@ namespace IfcViewer.Viewer
             _mouseTarget.PreviewMouseUp      += OnMouseUp;
             _mouseTarget.PreviewMouseMove    += OnMouseMove;
 
-            _timer.Start();
+            // CompositionTarget.Rendering fires once per render frame (synchronized
+            // with the GPU present cycle), eliminating timer drift and queued ticks.
+            CompositionTarget.Rendering      += OnTick;
             _keyTarget.Focus();
 
             SessionLogger.Info("FirstPersonController: activated.");
@@ -110,7 +107,7 @@ namespace IfcViewer.Viewer
             if (!_active) return;
             _active = false;
 
-            _timer.Stop();
+            CompositionTarget.Rendering      -= OnTick;
             _keysDown.Clear();
             StopMouseLook();
 
@@ -127,17 +124,18 @@ namespace IfcViewer.Viewer
         public void Dispose()
         {
             Deactivate();
-            _timer.Tick -= OnTick;
         }
 
         // ── Timer tick: move camera ───────────────────────────────────────────
 
         private void OnTick(object sender, EventArgs e)
         {
-            var now     = DateTime.UtcNow;
-            double dt   = (now - _lastTick).TotalSeconds;
-            _lastTick   = now;
-            dt          = Math.Min(dt, 0.1); // cap to avoid huge jumps after stall
+            if (!_active) return;
+
+            var now   = DateTime.UtcNow;
+            double dt = (now - _lastTick).TotalSeconds;
+            _lastTick = now;
+            dt        = Math.Min(dt, 0.1); // cap to avoid huge jumps after stall
 
             bool sprint = _keysDown.Contains(Key.LeftShift) || _keysDown.Contains(Key.RightShift);
             double speed = WalkSpeed * (sprint ? SprintMultiplier : 1.0) * dt;

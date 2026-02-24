@@ -207,9 +207,30 @@ namespace IfcViewer.UI
                 ApplySettings();
                 RestoreWindowGeometry(_settings);
 
-                // NOTE: WireframeToggle will be enabled when IFC or Revit geometry loads
-                // (see AddIfc_Click, ApplyRevitUpdate). We don't enable it here because
-                // the test scene geometry would trigger wireframe extraction unnecessarily.
+                // Wire up 3D view picker callbacks now that _settings is loaded.
+                // These are called from the Revit API thread via Dispatcher.Invoke
+                // when no active 3D view is present and a picker dialog is needed.
+                _syncRevitEvent.PickView3DCallback = (viewNames, preselected) =>
+                {
+                    string result = null;
+                    Dispatcher.Invoke((Action)(() =>
+                    {
+                        var dlg = new View3DPickerDialog(viewNames, preselected) { Owner = this };
+                        if (dlg.ShowDialog() == true)
+                            result = dlg.SelectedViewName;
+                    }));
+                    return result;
+                };
+                _syncRevitEvent.SaveViewCallback = (docPath, viewName) =>
+                {
+                    _settings.SavedRevit3DViews[docPath] = viewName;
+                    _settings.Save();
+                };
+                _syncRevitEvent.GetSavedViewCallback = docPath =>
+                {
+                    _settings.SavedRevit3DViews.TryGetValue(docPath, out string name);
+                    return name;
+                };
 
                 // 11. Intercept scroll wheel at Window level to implement instant, inertia-free
                 //     zoom. Mark e.Handled=true so Helix's smooth animated zoom never fires.
@@ -318,17 +339,17 @@ namespace IfcViewer.UI
                     // Register all cross-section meshes with the section plane manager
                     _sectionMgr?.RegisterGroup(ifcModel.SceneGroup);
 
-                    // Enable wireframe overlay on first model load; rebuild on subsequent loads
-                    if (_loadedModels.Count == 1)
-                        WireframeToggle.IsChecked = true;  // Triggers Wireframe_Checked → RebuildWireframe
-                    else if (WireframeToggle?.IsChecked == true)
+                    // Rebuild wireframe if the overlay is already enabled by the user
+                    if (WireframeToggle?.IsChecked == true)
                         RebuildWireframe();
 
                     // Update section slider range to cover the full scene
                     UpdateSectionBounds();
 
-                    // Fit camera to the loaded geometry
-                    _viewerHost.FitView(ifcModel.Bounds);
+                    // Fit camera only on the very first geometry load so the user's
+                    // current camera position is preserved when adding additional models.
+                    if (_loadedModels.Count == 1 && _revitModel == null)
+                        _viewerHost.FitView(ifcModel.Bounds);
 
                     // Watch the file for external changes (e.g. re-export from Revit)
                     var watcher = new IfcFileWatcher(path,
@@ -502,11 +523,8 @@ namespace IfcViewer.UI
 
             if (fitCamera) _viewerHost.FitView(model.Bounds);
 
-            // Enable wireframe overlay on first Revit export; rebuild on incremental updates
-            // (WireframeToggle may already be on from IFC loading, so only toggle if needed)
-            if (WireframeToggle?.IsChecked != true)
-                WireframeToggle.IsChecked = true;  // Triggers Wireframe_Checked → RebuildWireframe
-            else
+            // Rebuild wireframe if the overlay is already enabled by the user
+            if (WireframeToggle?.IsChecked == true)
                 RebuildWireframe();
 
             UpdateStatus($"Revit: {model.DisplayName}  |  {model.MeshCount} elements  |  {model.TriangleCount} triangles");
@@ -577,7 +595,7 @@ namespace IfcViewer.UI
 
                 _sectionMgr?.RegisterGroup(newModel.SceneGroup);
                 UpdateSectionBounds();
-                _viewerHost.FitView(newModel.Bounds);
+                // Don't move the camera on reload — user keeps their current view position.
 
                 // Rebuild wireframe for the freshly reloaded geometry
                 if (WireframeToggle?.IsChecked == true)
@@ -625,8 +643,9 @@ namespace IfcViewer.UI
 
         private void Viewport_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
         {
-            // No selection in walk mode — right-drag owns the mouse there.
-            if (_fpController?.IsActive == true) return;
+            // Selection is allowed in both orbit mode and walk mode.
+            // In walk mode right-drag drives mouse-look (right button only), so
+            // left-click is free to hit-test and select elements.
 
             // Reject drags: only treat as a click if the mouse moved ≤5 px.
             var pos = e.GetPosition(_viewport);

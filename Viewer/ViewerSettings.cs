@@ -1,5 +1,6 @@
 using Newtonsoft.Json;
 using System;
+using System.Collections.Generic;
 using System.IO;
 
 namespace IfcViewer.Viewer
@@ -40,6 +41,16 @@ namespace IfcViewer.Viewer
         public double? WindowTop    { get; set; }
         public double? WindowWidth  { get; set; }
         public double? WindowHeight { get; set; }
+
+        // ── Revit 3D view preference ──────────────────────────────────────────
+        /// <summary>
+        /// Per-project saved 3D view for Revit geometry export.
+        /// Key = Revit document path (PathName), Value = View3D name.
+        /// Used when the active Revit view is not a 3D view so the user
+        /// does not have to pick a view on every export.
+        /// </summary>
+        public Dictionary<string, string> SavedRevit3DViews { get; set; }
+            = new Dictionary<string, string>();
 
         // ── Serialization ──────────────────────────────────────────────────────
 

@@ -77,6 +77,7 @@ namespace IfcViewer.UI
             _settings.WalkSpeed = e.NewValue;
             WalkSpeedLabel.Text = e.NewValue.ToString("F1");
             _hasChanges = true;
+            _onChange?.Invoke();   // apply immediately to live viewer
             UpdateApplyButtonState();
         }
 
@@ -87,6 +88,7 @@ namespace IfcViewer.UI
             _settings.SprintMultiplier = e.NewValue;
             SprintLabel.Text = e.NewValue.ToString("F1") + "x";
             _hasChanges = true;
+            _onChange?.Invoke();
             UpdateApplyButtonState();
         }
 
@@ -97,6 +99,7 @@ namespace IfcViewer.UI
             _settings.MouseSensitivity = e.NewValue / 1000.0;
             MouseSensLabel.Text = ((int)e.NewValue).ToString();
             _hasChanges = true;
+            _onChange?.Invoke();
             UpdateApplyButtonState();
         }
 
@@ -107,6 +110,7 @@ namespace IfcViewer.UI
             _settings.ZoomStep = e.NewValue / 100.0;
             ZoomStepLabel.Text = ((int)e.NewValue) + "%";
             _hasChanges = true;
+            _onChange?.Invoke();
             UpdateApplyButtonState();
         }
 
@@ -117,6 +121,7 @@ namespace IfcViewer.UI
             _settings.FieldOfView = e.NewValue;
             FovLabel.Text = ((int)e.NewValue) + "°";
             _hasChanges = true;
+            _onChange?.Invoke();
             UpdateApplyButtonState();
         }
 
@@ -144,12 +149,12 @@ namespace IfcViewer.UI
 
         private void Apply_Click(object sender, RoutedEventArgs e)
         {
-            // Apply the current settings to the viewer and save to disk
-            _onChange?.Invoke();
+            // Settings are already applied live (via _onChange in each ValueChanged).
+            // Apply button just persists them to disk.
             _settings.Save();
             _hasChanges = false;
             UpdateApplyButtonState();
-            SessionLogger.Info("Settings applied and saved.");
+            SessionLogger.Info("Settings saved.");
         }
 
         // ── Window chrome ─────────────────────────────────────────────────────

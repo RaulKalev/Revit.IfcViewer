@@ -3,6 +3,7 @@ using Autodesk.Revit.DB.Events;
 using Autodesk.Revit.UI;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Windows.Threading;
 
@@ -16,6 +17,11 @@ namespace IfcViewer.Revit
     /// Auto-sync: call <see cref="StartAutoSync"/> to subscribe to
     /// <c>Application.DocumentChanged</c> and perform incremental updates on every
     /// transaction that modifies geometry (debounced 800 ms).
+    ///
+    /// When the active Revit view is not a 3D view, <see cref="ResolveView3D"/> falls
+    /// back to the saved preference (via <see cref="GetSavedViewCallback"/>) or shows
+    /// the <see cref="PickView3DCallback"/> dialog so the user can pick a view once.
+    /// The selection is saved via <see cref="SaveViewCallback"/> for future sessions.
     /// </summary>
     public sealed class SyncRevitEvent : IExternalEventHandler, IDisposable
     {
@@ -48,6 +54,21 @@ namespace IfcViewer.Revit
         private enum ExecMode { ManualSync, InitAutoSync, IncrementalSync }
         // volatile: written on thread-pool (debounce timer), read on Revit API thread.
         private volatile ExecMode _pendingMode = ExecMode.ManualSync;
+
+        // ── 3D view picker callbacks (set by IfcViewerWindow after creation) ──
+        /// <summary>
+        /// Called on the UI thread (via Dispatcher.Invoke) when no 3D view is active
+        /// and no saved preference exists.
+        /// Arguments: (viewNames, currentlySavedName) — either may be empty/null.
+        /// Returns the chosen view name, or <c>null</c> if the user cancels.
+        /// </summary>
+        public Func<string[], string, string> PickView3DCallback { get; set; }
+
+        /// <summary>Persists (docPath, viewName) to the settings file.</summary>
+        public Action<string, string> SaveViewCallback { get; set; }
+
+        /// <summary>Returns the saved view name for a document path, or <c>null</c>.</summary>
+        public Func<string, string> GetSavedViewCallback { get; set; }
 
         // ── Construction ──────────────────────────────────────────────────────
 
@@ -114,18 +135,18 @@ namespace IfcViewer.Revit
         {
             try
             {
-                var doc  = app.ActiveUIDocument?.Document;
-                var view = doc?.ActiveView as View3D;
-
+                var doc = app.ActiveUIDocument?.Document;
                 if (doc == null)
                 {
                     FireError(_onError, new InvalidOperationException("No active Revit document."));
                     return;
                 }
+
+                var view = ResolveView3D(doc);
                 if (view == null)
                 {
                     FireError(_onError, new InvalidOperationException(
-                        "The active view must be a 3D view to export Revit geometry."));
+                        "No 3D view selected. Please switch to a 3D view or pick one when prompted."));
                     return;
                 }
 
@@ -147,13 +168,18 @@ namespace IfcViewer.Revit
         {
             try
             {
-                var doc  = app.ActiveUIDocument?.Document;
-                var view = doc?.ActiveView as View3D;
+                var doc = app.ActiveUIDocument?.Document;
+                if (doc == null)
+                {
+                    FireError(_onAutoError, new InvalidOperationException("No active Revit document."));
+                    return;
+                }
 
-                if (doc == null || view == null)
+                var view = ResolveView3D(doc);
+                if (view == null)
                 {
                     FireError(_onAutoError, new InvalidOperationException(
-                        "Auto-sync requires an active 3D view."));
+                        "No 3D view selected. Please switch to a 3D view or pick one when prompted."));
                     return;
                 }
 
@@ -220,6 +246,98 @@ namespace IfcViewer.Revit
                 SessionLogger.Error("SyncRevitEvent.ExecuteIncrementalSync failed.", ex);
                 FireError(_onAutoError, ex);
             }
+        }
+
+        // ── View resolution ───────────────────────────────────────────────────
+
+        /// <summary>
+        /// Returns a <see cref="View3D"/> to use for export, in priority order:
+        /// 1. Active view (if already a non-template 3D view)
+        /// 2. Saved preference from a previous session (looked up via <see cref="GetSavedViewCallback"/>)
+        /// 3. The only available 3D view (auto-selected silently)
+        /// 4. User picks via the <see cref="PickView3DCallback"/> dialog (result is saved)
+        ///
+        /// Runs on the Revit API thread; the picker dialog is marshalled to the UI thread
+        /// via a blocking <c>Dispatcher.Invoke</c> so the Revit thread waits for the choice.
+        /// </summary>
+        private View3D ResolveView3D(Document doc)
+        {
+            if (doc == null) return null;
+
+            // 1. Active view is already a suitable 3D view — use it directly.
+            if (doc.ActiveView is View3D active && !active.IsTemplate)
+                return active;
+
+            // 2. Collect all available non-template 3D views.
+            var views = new FilteredElementCollector(doc)
+                .OfClass(typeof(View3D))
+                .Cast<View3D>()
+                .Where(v => !v.IsTemplate)
+                .OrderBy(v => v.Name)
+                .ToList();
+
+            if (views.Count == 0)
+            {
+                SessionLogger.Warn("ResolveView3D: document has no non-template 3D views.");
+                return null;
+            }
+
+            // 3. Check saved preference for this document.
+            string docKey    = doc.PathName ?? string.Empty;
+            string savedName = string.IsNullOrEmpty(docKey)
+                ? null : GetSavedViewCallback?.Invoke(docKey);
+
+            if (!string.IsNullOrEmpty(savedName))
+            {
+                var savedView = views.FirstOrDefault(v => v.Name == savedName);
+                if (savedView != null)
+                {
+                    SessionLogger.Info($"ResolveView3D: using saved view \"{savedName}\".");
+                    return savedView;
+                }
+                // Saved name no longer exists — fall through to picker.
+                SessionLogger.Warn($"ResolveView3D: saved view \"{savedName}\" not found; repicking.");
+            }
+
+            // 4. Only one 3D view — use it silently without prompting.
+            if (views.Count == 1)
+            {
+                SessionLogger.Info($"ResolveView3D: single 3D view \"{views[0].Name}\" auto-selected.");
+                if (!string.IsNullOrEmpty(docKey))
+                    SaveViewCallback?.Invoke(docKey, views[0].Name);
+                return views[0];
+            }
+
+            // 5. Multiple views and no saved preference — show picker on UI thread.
+            if (PickView3DCallback == null)
+            {
+                SessionLogger.Warn("ResolveView3D: no PickView3DCallback set; cannot show picker.");
+                return null;
+            }
+
+            var names  = views.Select(v => v.Name).ToArray();
+            string chosen = null;
+            // Dispatcher.Invoke blocks the Revit API thread while the WPF dialog runs
+            // on the UI thread.  The dialog is purely WPF (no Revit API calls inside),
+            // so there is no deadlock risk.
+            _uiDispatcher.Invoke((Action)(() =>
+            {
+                chosen = PickView3DCallback(names, savedName);
+            }));
+
+            if (string.IsNullOrEmpty(chosen))
+            {
+                SessionLogger.Info("ResolveView3D: user cancelled view picker.");
+                return null;
+            }
+
+            var picked = views.FirstOrDefault(v => v.Name == chosen);
+            if (picked != null && !string.IsNullOrEmpty(docKey))
+            {
+                SaveViewCallback?.Invoke(docKey, chosen);
+                SessionLogger.Info($"ResolveView3D: user picked \"{chosen}\" — saved for this project.");
+            }
+            return picked;
         }
 
         // ── DocumentChanged handler (Revit API thread) ────────────────────────

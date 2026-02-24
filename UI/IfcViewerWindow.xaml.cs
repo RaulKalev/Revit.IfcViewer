@@ -74,7 +74,15 @@ namespace IfcViewer.UI
             = new Dictionary<MeshGeometryModel3D, RevitElementInfo>();
         private MeshGeometryModel3D  _selectedMesh;
         private Color4               _selectedOriginalEmissive;
+        private string               _selectedOriginalPostEffects = string.Empty;
         private System.Windows.Point _selectionMouseDown;
+
+        // ── Element outline (PostEffects border on every mesh) ────────────────
+        // A subtle dark border is applied to every mesh when it enters the scene,
+        // giving elements a clean visible outline in the normal (non-wireframe) view.
+        // The selected mesh overrides this with a bright teal border.
+        private const string NormalOutlineEffect   = "border[color:#444444;thickness:1]";
+        private const string SelectedOutlineEffect = "border[color:#70BABC;thickness:2.5]";
 
         // ── Constructor ───────────────────────────────────────────────────────
         public IfcViewerWindow(UIApplication uiApp)
@@ -329,6 +337,7 @@ namespace IfcViewer.UI
 
                     // Attach to scene on UI thread
                     _viewerHost.IfcRoot.Children.Add(ifcModel.SceneGroup);
+                    SetGroupOutline(ifcModel.SceneGroup, NormalOutlineEffect);
                     _loadedModels.Add(ifcModel);
                     ModelListBox.SelectedItem = ifcModel;
 
@@ -505,6 +514,7 @@ namespace IfcViewer.UI
             }
 
             _revitModel = model;
+            SetGroupOutline(_revitModel.SceneGroup, NormalOutlineEffect);
             _sectionMgr?.RegisterGroup(_revitModel.SceneGroup);
             UpdateSectionBounds();
 
@@ -586,6 +596,7 @@ namespace IfcViewer.UI
                     onProgress: msg => UpdateStatus(msg));
 
                 _viewerHost.IfcRoot.Children.Add(newModel.SceneGroup);
+                SetGroupOutline(newModel.SceneGroup, NormalOutlineEffect);
                 _loadedModels.Add(newModel);
                 ModelListBox.SelectedItem = newModel;
 
@@ -678,11 +689,18 @@ namespace IfcViewer.UI
             ClearSelection();
         }
 
-        /// <summary>Shared highlight logic — teal emissive glow on <paramref name="mesh"/>.</summary>
+        /// <summary>
+        /// Shared highlight logic — teal emissive glow + teal border outline on
+        /// <paramref name="mesh"/>.  Saves and restores both the emissive colour and
+        /// the PostEffects outline so the previous selection is cleanly un-highlighted.
+        /// </summary>
         private void HighlightMesh(MeshGeometryModel3D mesh)
         {
+            // Restore the previous selection's emissive colour and outline.
             if (_selectedMesh != null && _selectedMesh.Material is PhongMaterial prev)
                 prev.EmissiveColor = _selectedOriginalEmissive;
+            if (_selectedMesh != null)
+                _selectedMesh.PostEffects = _selectedOriginalPostEffects;
 
             _selectedMesh = mesh;
 
@@ -691,6 +709,10 @@ namespace IfcViewer.UI
                 _selectedOriginalEmissive = mat.EmissiveColor;
                 mat.EmissiveColor = new Color4(0.08f, 0.42f, 0.42f, 1f);
             }
+
+            // Override the normal dark border with a bright teal selection border.
+            _selectedOriginalPostEffects = mesh.PostEffects ?? string.Empty;
+            mesh.PostEffects = SelectedOutlineEffect;
         }
 
         private void SelectElement(MeshGeometryModel3D mesh, IfcElementInfo info)
@@ -712,6 +734,8 @@ namespace IfcViewer.UI
         {
             if (_selectedMesh != null && _selectedMesh.Material is PhongMaterial mat)
                 mat.EmissiveColor = _selectedOriginalEmissive;
+            if (_selectedMesh != null)
+                _selectedMesh.PostEffects = _selectedOriginalPostEffects;
 
             _selectedMesh = null;
             HideProperties();
@@ -983,6 +1007,22 @@ namespace IfcViewer.UI
                     results.Add(mg);
                 else if (child is GroupModel3D sub)
                     CollectMeshGeometries(sub, results);
+            }
+        }
+
+        /// <summary>
+        /// Recursively sets <see cref="MeshGeometryModel3D.PostEffects"/> on every mesh
+        /// in <paramref name="group"/> to produce a visible element outline in the
+        /// normal (non-wireframe) view.  Pass <c>null</c> or <c>""</c> to clear.
+        /// </summary>
+        private static void SetGroupOutline(GroupModel3D group, string effect)
+        {
+            foreach (var child in group.Children)
+            {
+                if (child is MeshGeometryModel3D mesh)
+                    mesh.PostEffects = effect ?? string.Empty;
+                else if (child is GroupModel3D sub)
+                    SetGroupOutline(sub, effect);
             }
         }
 

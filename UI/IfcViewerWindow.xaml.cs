@@ -14,8 +14,14 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.ComponentModel;
+using System.Globalization;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using Media3D = System.Windows.Media.Media3D;
+using WpfColor  = System.Windows.Media.Color;
+using WpfPoint  = System.Windows.Point;
+using WpfShapes = System.Windows.Shapes;
 
 namespace IfcViewer.UI
 {
@@ -84,6 +90,12 @@ namespace IfcViewer.UI
         // the sharpest structural edges show — clean "outline" vs detailed wireframe.
         private GroupModel3D _outlineRoot;
 
+        // ── ViewCube compass ring ──────────────────────────────────────────────
+        // WPF 2D overlay positioned below the Helix built-in ViewCube.
+        // Rotates with the camera's horizontal heading so N always points to
+        // model-north (treating -Z as north, matching IFC/Revit convention).
+        private RotateTransform _compassRotate;
+
         // ── Constructor ───────────────────────────────────────────────────────
         public IfcViewerWindow(UIApplication uiApp)
         {
@@ -130,6 +142,16 @@ namespace IfcViewer.UI
                     UseDefaultGestures       = false,
                     // Shadows off — pure technical viewer
                     IsShadowMappingEnabled   = false,
+                    // ── Built-in ViewCube ──────────────────────────────────────
+                    // Custom Revit-style texture applied below after construction.
+                    // Position: top-right (HorizontalPosition + VerticalPosition are
+                    // normalised device coords: +x = right, +y = top).
+                    ShowViewCube               = true,
+                    ViewCubeSize               = 80,
+                    ViewCubeHorizontalPosition = 0.75,
+                    ViewCubeVerticalPosition   = 0.90,
+                    IsViewCubeEdgeClicksEnabled = true,
+                    IsViewCubeMoverEnabled      = false,
                 };
 
                 // 3. Scene root
@@ -188,6 +210,17 @@ namespace IfcViewer.UI
                 //     load/unload; not tied to the wireframe toggle.
                 _outlineRoot = new GroupModel3D();
                 _sceneRoot.Children.Add(_outlineRoot);
+
+                // 5d. ViewCube: apply Revit-style face texture and add compass ring.
+                _viewport.ViewCubeTexture = CreateRevitViewCubeTexture();
+                ViewportContainer.Children.Add(BuildCompassOverlay());
+
+                // Update compass heading whenever the camera's look direction changes.
+                DependencyPropertyDescriptor
+                    .FromProperty(Media3D.PerspectiveCamera.LookDirectionProperty,
+                                  typeof(Media3D.PerspectiveCamera))
+                    .AddValueChanged(_viewerHost.Camera, (s2, e2) => UpdateCompassHeading());
+                UpdateCompassHeading(); // seed initial angle
 
                 // 6. Bind the model list
                 ModelListBox.ItemsSource = _loadedModels;
@@ -943,6 +976,169 @@ namespace IfcViewer.UI
         {
             _wireframeRoot?.Children.Clear();
             SessionLogger.Info("Wireframe off.");
+        }
+
+        // ── ViewCube helpers ──────────────────────────────────────────────────
+
+        /// <summary>
+        /// Creates a TextureModel (600×100 px, Revit-style) with six face labels
+        /// in Helix's expected order: Front | Back | Left | Right | Top | Bottom.
+        /// The bitmap is PNG-encoded into a MemoryStream so TextureModel can consume it.
+        /// </summary>
+        private static TextureModel CreateRevitViewCubeTexture()
+        {
+            const int S = 100; // pixels per face
+            var labels = new[] { "FRONT", "BACK", "LEFT", "RIGHT", "TOP", "BOTTOM" };
+
+            // Stone-gray faces with subtly different brightness per face (Revit style)
+            var faceColors = new[]
+            {
+                WpfColor.FromRgb(0xBE, 0xC3, 0xC8), // Front  — mid
+                WpfColor.FromRgb(0xAE, 0xB3, 0xB8), // Back   — darker
+                WpfColor.FromRgb(0xB8, 0xBD, 0xC2), // Left   — mid-dark
+                WpfColor.FromRgb(0xC8, 0xCC, 0xD0), // Right  — lighter
+                WpfColor.FromRgb(0xD4, 0xD8, 0xDC), // Top    — lightest
+                WpfColor.FromRgb(0xA8, 0xAC, 0xB0), // Bottom — darkest
+            };
+
+            var borderPen = new Pen(new SolidColorBrush(WpfColor.FromRgb(0x80, 0x85, 0x88)), 0.5);
+            var textBrush = new SolidColorBrush(WpfColor.FromRgb(0x26, 0x26, 0x26));
+            var typeface  = new Typeface(
+                new FontFamily("Segoe UI"),
+                FontStyles.Normal, FontWeights.Bold, FontStretches.Normal);
+
+            var dv = new DrawingVisual();
+            using (var dc = dv.RenderOpen())
+            {
+                for (int i = 0; i < labels.Length; i++)
+                {
+                    var rect = new Rect(i * S, 0, S, S);
+                    dc.DrawRectangle(new SolidColorBrush(faceColors[i]), borderPen, rect);
+
+                    double fontSize = labels[i].Length > 4 ? 11.0 : 14.0;
+                    var ft = new FormattedText(
+                        labels[i], CultureInfo.InvariantCulture,
+                        FlowDirection.LeftToRight, typeface, fontSize, textBrush, 1.0);
+
+                    dc.DrawText(ft, new WpfPoint(
+                        rect.X + (S - ft.Width)  / 2,
+                        rect.Y + (S - ft.Height) / 2));
+                }
+            }
+
+            var rtb = new RenderTargetBitmap(S * labels.Length, S, 96, 96, PixelFormats.Pbgra32);
+            rtb.Render(dv);
+
+            // TextureModel accepts a Stream; encode the bitmap as PNG in memory.
+            var encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(rtb));
+            var ms = new System.IO.MemoryStream();
+            encoder.Save(ms);
+            ms.Seek(0, System.IO.SeekOrigin.Begin);
+            return new TextureModel(ms);
+        }
+
+        /// <summary>
+        /// Builds the WPF compass ring overlay that appears below the ViewCube.
+        /// The entire canvas (ring + N/S/E/W labels + arrows) rotates as the
+        /// camera's horizontal heading changes, keeping N pointed at model-north.
+        /// </summary>
+        private FrameworkElement BuildCompassOverlay()
+        {
+            const double D  = 84;           // overall canvas size (px)
+            const double cx = D / 2, cy = D / 2;
+            const double R  = D / 2 - 3;   // ring radius
+
+            _compassRotate = new RotateTransform(0, cx, cy);
+
+            var canvas = new Canvas { Width = D, Height = D, IsHitTestVisible = false };
+            canvas.RenderTransform = _compassRotate;
+
+            // ── Outer ring ─────────────────────────────────────────────────────
+            var ring = new WpfShapes.Ellipse
+            {
+                Width           = R * 2,
+                Height          = R * 2,
+                Stroke          = new SolidColorBrush(WpfColor.FromArgb(200, 155, 155, 155)),
+                StrokeThickness = 1.2,
+            };
+            Canvas.SetLeft(ring, cx - R);
+            Canvas.SetTop(ring,  cy - R);
+            canvas.Children.Add(ring);
+
+            // ── North arrow (teal triangle) ─────────────────────────────────────
+            var north = new WpfShapes.Polygon
+            {
+                Fill   = new SolidColorBrush(WpfColor.FromRgb(0x70, 0xBA, 0xBC)),
+                Points = new PointCollection
+                {
+                    new WpfPoint(cx,       cy - R + 2),
+                    new WpfPoint(cx - 5.5, cy - R + 14),
+                    new WpfPoint(cx + 5.5, cy - R + 14),
+                },
+            };
+            canvas.Children.Add(north);
+
+            // ── South marker (smaller gray triangle) ───────────────────────────
+            var south = new WpfShapes.Polygon
+            {
+                Fill   = new SolidColorBrush(WpfColor.FromArgb(200, 115, 115, 115)),
+                Points = new PointCollection
+                {
+                    new WpfPoint(cx,     cy + R - 2),
+                    new WpfPoint(cx - 4, cy + R - 12),
+                    new WpfPoint(cx + 4, cy + R - 12),
+                },
+            };
+            canvas.Children.Add(south);
+
+            // ── Cardinal labels ─────────────────────────────────────────────────
+            AddCompassLabel(canvas, "N", cx - 4.5,    cy - R + 2,  WpfColor.FromRgb(0x70, 0xBA, 0xBC), bold: true);
+            AddCompassLabel(canvas, "S", cx - 4,      cy + R - 14, WpfColor.FromArgb(200, 160, 160, 160));
+            AddCompassLabel(canvas, "E", cx + R - 12, cy - 5.5,    WpfColor.FromArgb(200, 160, 160, 160));
+            AddCompassLabel(canvas, "W", cx - R + 2,  cy - 5.5,    WpfColor.FromArgb(200, 160, 160, 160));
+
+            // ── Container: anchors top-right, positioned below the 80px ViewCube ─
+            return new Border
+            {
+                Width               = D,
+                Height              = D,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment   = VerticalAlignment.Top,
+                Margin              = new Thickness(0, 88, 30, 0),
+                IsHitTestVisible    = false,
+                Child               = canvas,
+            };
+        }
+
+        private static void AddCompassLabel(Canvas canvas, string text,
+            double left, double top, WpfColor color, bool bold = false)
+        {
+            var tb = new TextBlock
+            {
+                Text             = text,
+                FontSize         = 9,
+                FontWeight       = bold ? FontWeights.Bold : FontWeights.Normal,
+                Foreground       = new SolidColorBrush(color),
+                IsHitTestVisible = false,
+            };
+            Canvas.SetLeft(tb, left);
+            Canvas.SetTop(tb, top);
+            canvas.Children.Add(tb);
+        }
+
+        /// <summary>
+        /// Recomputes the compass heading from the camera's horizontal look direction.
+        /// Treating -Z as model-north: heading = atan2(look.X, -look.Z).
+        /// The compass content rotates by the negative heading so N stays pointed
+        /// toward model-north regardless of the camera's horizontal orientation.
+        /// </summary>
+        private void UpdateCompassHeading()
+        {
+            if (_compassRotate == null || _viewerHost == null) return;
+            var look = _viewerHost.Camera.LookDirection;
+            double heading = Math.Atan2(look.X, -look.Z) * (180.0 / Math.PI);
+            _compassRotate.Angle = -heading;
         }
 
         /// <summary>

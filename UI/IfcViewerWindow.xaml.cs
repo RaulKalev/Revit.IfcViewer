@@ -1039,8 +1039,12 @@ namespace IfcViewer.UI
         {
             foreach (var child in group.Children)
             {
-                if (ReferenceEquals(child, _wireframeRoot)) continue;
-                if (ReferenceEquals(child, _outlineRoot))   continue;
+                if (ReferenceEquals(child, _wireframeRoot))           continue;
+                if (ReferenceEquals(child, _outlineRoot))             continue;
+                // Skip the section-plane quad — it is a 500 m helper mesh, not
+                // building geometry, and would produce a giant diagonal line.
+                if (_sectionMgr != null &&
+                    ReferenceEquals(child, _sectionMgr.PlaneVisual)) continue;
                 if (child is MeshGeometryModel3D m && m.Geometry is MeshGeometry3D mg)
                     results.Add(mg);
                 else if (child is GroupModel3D sub)

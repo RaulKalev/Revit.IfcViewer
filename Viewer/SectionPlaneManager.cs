@@ -44,6 +44,13 @@ namespace IfcViewer.Viewer
         private GroupModel3D        _visualParent;
         private const float QuadHalfSize = 500f;
 
+        /// <summary>
+        /// The semi-transparent plane quad mesh, or <c>null</c> before
+        /// <see cref="AttachVisual"/> is called.  Exposed so callers can skip it
+        /// when collecting scene meshes (e.g. wireframe / outline helpers).
+        /// </summary>
+        public MeshGeometryModel3D PlaneVisual => _planeVisual;
+
         // ── Public API ────────────────────────────────────────────────────────
 
         public bool Enabled

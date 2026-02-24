@@ -4,13 +4,16 @@ using IfcViewer.Ifc;
 using IfcViewer.Revit;
 using IfcViewer.Viewer;
 using Microsoft.Win32;
+using SharpDX;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 
 namespace IfcViewer.UI
 {
@@ -60,6 +63,15 @@ namespace IfcViewer.UI
         private readonly Dictionary<string, IfcFileWatcher> _fileWatchers
             = new Dictionary<string, IfcFileWatcher>(StringComparer.OrdinalIgnoreCase);
         private IfcModel _pendingReload;
+
+        // Stage 5: Element selection + properties panel
+        // Flat map of all loaded IFC meshes → their extracted element info.
+        // Maintained in sync with _loadedModels.
+        private readonly Dictionary<MeshGeometryModel3D, IfcElementInfo> _ifcElementMap
+            = new Dictionary<MeshGeometryModel3D, IfcElementInfo>();
+        private MeshGeometryModel3D _selectedMesh;
+        private Color4 _selectedOriginalEmissive;
+        private System.Windows.Point _selectionMouseDown;
 
         // ── Constructor ───────────────────────────────────────────────────────
         public IfcViewerWindow(UIApplication uiApp)
@@ -117,6 +129,12 @@ namespace IfcViewer.UI
                 // Give keyboard focus on any click so CameraController receives events.
                 _viewport.MouseDown += (s, ev) => _viewport.Focus();
                 ViewportContainer.Children.Insert(0, _viewport);
+
+                // Hook left-click for element selection.
+                // MouseLeftButtonDown records the down position so we can distinguish
+                // clicks from camera-orbit drags in MouseLeftButtonUp.
+                _viewport.MouseLeftButtonDown += Viewport_MouseLeftButtonDown;
+                _viewport.MouseLeftButtonUp   += Viewport_MouseLeftButtonUp;
 
                 // 5a. Wire custom mouse bindings once the template is applied.
                 //     UseDefaultGestures=false clears Helix's built-ins; we re-add only
@@ -212,6 +230,10 @@ namespace IfcViewer.UI
                 foreach (var w in _fileWatchers.Values) w.Dispose();
                 _fileWatchers.Clear();
 
+                // Clear selection state so no stale material references remain.
+                _selectedMesh = null;
+                _ifcElementMap.Clear();
+
                 this.PreviewMouseWheel -= OnPreviewMouseWheel;
                 _fpController?.Dispose();
                 _sectionMgr?.DetachVisual();
@@ -273,6 +295,10 @@ namespace IfcViewer.UI
                     _loadedModels.Add(ifcModel);
                     ModelListBox.SelectedItem = ifcModel;
 
+                    // Populate the element selection map with this model's per-element meshes
+                    foreach (var kvp in ifcModel.ElementMap)
+                        _ifcElementMap[kvp.Key] = kvp.Value;
+
                     // Register all cross-section meshes with the section plane manager
                     _sectionMgr?.RegisterGroup(ifcModel.SceneGroup);
 
@@ -332,6 +358,14 @@ namespace IfcViewer.UI
                 _pendingReload = null;
                 ReloadBanner.Visibility = Visibility.Collapsed;
             }
+
+            // Clear selection if the selected element belongs to the model being removed
+            if (_selectedMesh != null && selected.ElementMap.ContainsKey(_selectedMesh))
+                ClearSelection();
+
+            // Remove this model's meshes from the flat element map
+            foreach (var mesh in selected.ElementMap.Keys)
+                _ifcElementMap.Remove(mesh);
 
             // Remove from scene
             _sectionMgr?.UnregisterGroup(selected.SceneGroup);
@@ -475,6 +509,14 @@ namespace IfcViewer.UI
 
             string path = model.FilePath;
 
+            // Clear selection if the selected element belongs to the model being reloaded
+            if (_selectedMesh != null && model.ElementMap.ContainsKey(_selectedMesh))
+                ClearSelection();
+
+            // Remove old model's meshes from the flat element map
+            foreach (var mesh in model.ElementMap.Keys)
+                _ifcElementMap.Remove(mesh);
+
             // Remove the old model from the scene
             _sectionMgr?.UnregisterGroup(model.SceneGroup);
             _viewerHost.IfcRoot.Children.Remove(model.SceneGroup);
@@ -499,6 +541,10 @@ namespace IfcViewer.UI
                 _viewerHost.IfcRoot.Children.Add(newModel.SceneGroup);
                 _loadedModels.Add(newModel);
                 ModelListBox.SelectedItem = newModel;
+
+                // Populate element map with the freshly loaded model's meshes
+                foreach (var kvp in newModel.ElementMap)
+                    _ifcElementMap[kvp.Key] = kvp.Value;
 
                 _sectionMgr?.RegisterGroup(newModel.SceneGroup);
                 UpdateSectionBounds();
@@ -537,6 +583,156 @@ namespace IfcViewer.UI
         {
             ReloadBanner.Visibility = Visibility.Collapsed;
             _pendingReload = null;
+        }
+
+        // ── Element selection ─────────────────────────────────────────────────
+
+        private void Viewport_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            // Record the down position so MouseLeftButtonUp can distinguish a click
+            // (small movement) from a camera-orbit drag (large movement).
+            _selectionMouseDown = e.GetPosition(_viewport);
+        }
+
+        private void Viewport_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            // No selection in walk mode — right-drag owns the mouse there.
+            if (_fpController?.IsActive == true) return;
+
+            // Reject drags: only treat as a click if the mouse moved ≤5 px.
+            var pos = e.GetPosition(_viewport);
+            double dx = pos.X - _selectionMouseDown.X;
+            double dy = pos.Y - _selectionMouseDown.Y;
+            if (dx * dx + dy * dy > 25) return;
+
+            // Hit-test the 3D scene at the click position.
+            var hits = _viewport?.FindHits(pos);
+            if (hits == null || hits.Count == 0) { ClearSelection(); return; }
+
+            foreach (var hit in hits)
+            {
+                var mesh = hit.ModelHit as MeshGeometryModel3D;
+                if (mesh != null && _ifcElementMap.TryGetValue(mesh, out IfcElementInfo info))
+                {
+                    SelectElement(mesh, info);
+                    return;
+                }
+            }
+
+            // Click landed on geometry that has no entry in the element map
+            // (e.g. Revit meshes, section plane visual). Clear any current selection.
+            ClearSelection();
+        }
+
+        /// <summary>Highlights <paramref name="mesh"/> and shows its properties.</summary>
+        private void SelectElement(MeshGeometryModel3D mesh, IfcElementInfo info)
+        {
+            // Restore previous selection's original emissive colour.
+            if (_selectedMesh != null && _selectedMesh.Material is PhongMaterial prev)
+                prev.EmissiveColor = _selectedOriginalEmissive;
+
+            _selectedMesh = mesh;
+
+            if (mesh.Material is PhongMaterial mat)
+            {
+                _selectedOriginalEmissive = mat.EmissiveColor;
+                // Teal emissive glow — matches the UI accent colour.
+                mat.EmissiveColor = new Color4(0.08f, 0.42f, 0.42f, 1f);
+            }
+
+            ShowElementProperties(info);
+            SessionLogger.Info($"Selected: {info.Type} \"{info.Name}\"");
+        }
+
+        /// <summary>Removes the current highlight and clears the properties panel.</summary>
+        private void ClearSelection()
+        {
+            if (_selectedMesh != null && _selectedMesh.Material is PhongMaterial mat)
+                mat.EmissiveColor = _selectedOriginalEmissive;
+
+            _selectedMesh = null;
+            ShowElementProperties(null);
+        }
+
+        /// <summary>
+        /// Populates the right-hand properties panel.
+        /// Pass <c>null</c> to return to the "click an element" empty state.
+        /// </summary>
+        private void ShowElementProperties(IfcElementInfo info)
+        {
+            if (info == null)
+            {
+                PropEmptyHint.Visibility = Visibility.Visible;
+                PropContent.Visibility   = Visibility.Collapsed;
+                return;
+            }
+
+            PropEmptyHint.Visibility = Visibility.Collapsed;
+            PropContent.Visibility   = Visibility.Visible;
+
+            PropName.Text     = string.IsNullOrWhiteSpace(info.Name) ? "(unnamed)" : info.Name;
+            PropType.Text     = info.Type;
+            PropGlobalId.Text = info.GlobalId;
+
+            // Rebuild property-set rows from scratch each time.
+            PropSetsPanel.Children.Clear();
+
+            if (info.PropertySets.Count == 0)
+            {
+                PropSetsPanel.Children.Add(new TextBlock
+                {
+                    Text       = "No property sets found.",
+                    FontSize   = 10,
+                    Foreground = (Brush)FindResource("IconBrush"),
+                    Margin     = new Thickness(0, 4, 0, 0),
+                });
+                return;
+            }
+
+            foreach (var pset in info.PropertySets)
+            {
+                // Pset name header
+                PropSetsPanel.Children.Add(new TextBlock
+                {
+                    Text       = pset.Key,
+                    FontSize   = 10,
+                    FontWeight = FontWeights.SemiBold,
+                    Foreground = (Brush)FindResource("ForegroundBrush"),
+                    Margin     = new Thickness(0, 8, 0, 3),
+                });
+
+                foreach (var prop in pset.Value)
+                {
+                    // Two-column row: property name (left) | value (right)
+                    var row = new Grid { Margin = new Thickness(0, 1, 0, 1) };
+                    row.ColumnDefinitions.Add(new ColumnDefinition
+                        { Width = new GridLength(1, GridUnitType.Star) });
+                    row.ColumnDefinitions.Add(new ColumnDefinition
+                        { Width = new GridLength(1.2, GridUnitType.Star) });
+
+                    var nameBlock = new TextBlock
+                    {
+                        Text         = prop.Key,
+                        FontSize     = 10,
+                        Foreground   = (Brush)FindResource("IconBrush"),
+                        TextTrimming = TextTrimming.CharacterEllipsis,
+                        ToolTip      = prop.Key,
+                    };
+                    var valBlock = new TextBlock
+                    {
+                        Text        = prop.Value,
+                        FontSize    = 10,
+                        Foreground  = (Brush)FindResource("ForegroundBrush"),
+                        TextWrapping = TextWrapping.Wrap,
+                    };
+
+                    Grid.SetColumn(nameBlock, 0);
+                    Grid.SetColumn(valBlock, 1);
+                    row.Children.Add(nameBlock);
+                    row.Children.Add(valBlock);
+                    PropSetsPanel.Children.Add(row);
+                }
+            }
         }
 
         private void ResetCamera_Click(object sender, RoutedEventArgs e)

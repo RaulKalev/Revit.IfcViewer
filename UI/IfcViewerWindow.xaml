@@ -200,6 +200,8 @@
                         <ColumnDefinition Width="200" MinWidth="150" MaxWidth="350"/>
                         <ColumnDefinition Width="4"/>
                         <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="4"/>
+                        <ColumnDefinition Width="220" MinWidth="160" MaxWidth="400"/>
                     </Grid.ColumnDefinitions>
 
                     <!-- Left panel -->
@@ -292,8 +294,14 @@
                         </Grid>
                     </Border>
 
-                    <!-- Splitter -->
+                    <!-- Left splitter -->
                     <GridSplitter Grid.Column="1"
+                                  HorizontalAlignment="Stretch"
+                                  Background="{DynamicResource BorderBrush}"
+                                  ShowsPreview="False"/>
+
+                    <!-- Right splitter -->
+                    <GridSplitter Grid.Column="3"
                                   HorizontalAlignment="Stretch"
                                   Background="{DynamicResource BorderBrush}"
                                   ShowsPreview="False"/>
@@ -346,6 +354,64 @@
                                        FontSize="10"/>
                         </Border>
                     </Grid>
+
+                    <!-- ── Properties panel ── -->
+                    <Border Grid.Column="4"
+                            Background="{DynamicResource SecondaryBackgroundBrush}"
+                            BorderBrush="{DynamicResource BorderBrush}"
+                            BorderThickness="1,0,0,0">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+
+                            <TextBlock Grid.Row="0"
+                                       Text="PROPERTIES"
+                                       FontSize="11" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource IconBrush}"
+                                       Margin="8,8,8,4"/>
+
+                            <ScrollViewer Grid.Row="1"
+                                          VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled">
+                                <StackPanel Margin="8,4,8,8">
+
+                                    <!-- Empty state — shown when nothing is selected -->
+                                    <TextBlock x:Name="PropEmptyHint"
+                                               Text="Click an element in the viewport to view its properties."
+                                               Foreground="{DynamicResource IconBrush}"
+                                               FontSize="10"
+                                               TextWrapping="Wrap"
+                                               Margin="0,4,0,0"/>
+
+                                    <!-- Element details — shown when an element is selected -->
+                                    <StackPanel x:Name="PropContent" Visibility="Collapsed">
+                                        <TextBlock x:Name="PropName"
+                                                   FontSize="12" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource ForegroundBrush}"
+                                                   TextWrapping="Wrap"
+                                                   Margin="0,4,0,2"/>
+                                        <TextBlock x:Name="PropType"
+                                                   FontSize="10"
+                                                   Foreground="{DynamicResource IconBrush}"
+                                                   Margin="0,0,0,2"/>
+                                        <TextBlock x:Name="PropGlobalId"
+                                                   FontSize="9"
+                                                   Foreground="{DynamicResource IconBrush}"
+                                                   TextWrapping="Wrap"
+                                                   Margin="0,0,0,8"/>
+                                        <Separator Background="{DynamicResource BorderBrush}"
+                                                   Margin="0,0,0,4"/>
+                                        <!-- Property sets populated dynamically in code-behind -->
+                                        <StackPanel x:Name="PropSetsPanel"/>
+                                    </StackPanel>
+
+                                </StackPanel>
+                            </ScrollViewer>
+                        </Grid>
+                    </Border>
+
                 </Grid>
             </Grid>
         </Border>

@@ -1,5 +1,6 @@
 using HelixToolkit.Wpf.SharpDX;
 using SharpDX;
+using System.Collections.Generic;
 using System.IO;
 
 namespace IfcViewer.Ifc
@@ -28,14 +29,23 @@ namespace IfcViewer.Ifc
         /// <summary>Total triangle count across all meshes in this model.</summary>
         public int TriangleCount { get; }
 
+        /// <summary>
+        /// Maps each per-element mesh to its extracted IFC properties.
+        /// Used by the properties panel when the user clicks an element.
+        /// </summary>
+        public IReadOnlyDictionary<MeshGeometryModel3D, IfcElementInfo> ElementMap { get; }
+
         public IfcModel(string filePath, GroupModel3D sceneGroup,
-                        BoundingBox bounds, int meshCount, int triangleCount)
+                        BoundingBox bounds, int meshCount, int triangleCount,
+                        IReadOnlyDictionary<MeshGeometryModel3D, IfcElementInfo> elementMap)
         {
             FilePath      = filePath;
             SceneGroup    = sceneGroup;
             Bounds        = bounds;
             MeshCount     = meshCount;
             TriangleCount = triangleCount;
+            ElementMap    = elementMap
+                ?? new Dictionary<MeshGeometryModel3D, IfcElementInfo>();
         }
 
         public override string ToString() => DisplayName;

@@ -74,15 +74,14 @@ namespace IfcViewer.UI
             = new Dictionary<MeshGeometryModel3D, RevitElementInfo>();
         private MeshGeometryModel3D  _selectedMesh;
         private Color4               _selectedOriginalEmissive;
-        private string               _selectedOriginalPostEffects = string.Empty;
         private System.Windows.Point _selectionMouseDown;
 
-        // ── Element outline (PostEffects border on every mesh) ────────────────
-        // A subtle dark border is applied to every mesh when it enters the scene,
-        // giving elements a clean visible outline in the normal (non-wireframe) view.
-        // The selected mesh overrides this with a bright teal border.
-        private const string NormalOutlineEffect   = "border[color:#444444;thickness:1]";
-        private const string SelectedOutlineEffect = "border[color:#70BABC;thickness:2.5]";
+        // ── Always-on element outline ─────────────────────────────────────────
+        // Separate from _wireframeRoot (which the user toggles).
+        // Populated automatically whenever models load/unload via RebuildOutline().
+        // Uses a higher dihedral-angle threshold than the wireframe toggle so only
+        // the sharpest structural edges show — clean "outline" vs detailed wireframe.
+        private GroupModel3D _outlineRoot;
 
         // ── Constructor ───────────────────────────────────────────────────────
         public IfcViewerWindow(UIApplication uiApp)
@@ -180,10 +179,14 @@ namespace IfcViewer.UI
                 // 5. Build test scene
                 _viewerHost.BuildTestScene(_sceneRoot);
 
-                // 5b. Wireframe overlay group — lives alongside IfcRoot/RevitRoot.
-                //     Populated on demand by RebuildWireframe(); never holds mesh nodes.
+                // 5b. Wireframe overlay group — user-toggled hard-edge lines.
                 _wireframeRoot = new GroupModel3D();
                 _sceneRoot.Children.Add(_wireframeRoot);
+
+                // 5c. Always-on outline group — populated automatically whenever models
+                //     load/unload; not tied to the wireframe toggle.
+                _outlineRoot = new GroupModel3D();
+                _sceneRoot.Children.Add(_outlineRoot);
 
                 // 6. Bind the model list
                 ModelListBox.ItemsSource = _loadedModels;
@@ -337,7 +340,6 @@ namespace IfcViewer.UI
 
                     // Attach to scene on UI thread
                     _viewerHost.IfcRoot.Children.Add(ifcModel.SceneGroup);
-                    SetGroupOutline(ifcModel.SceneGroup, NormalOutlineEffect);
                     _loadedModels.Add(ifcModel);
                     ModelListBox.SelectedItem = ifcModel;
 
@@ -348,7 +350,8 @@ namespace IfcViewer.UI
                     // Register all cross-section meshes with the section plane manager
                     _sectionMgr?.RegisterGroup(ifcModel.SceneGroup);
 
-                    // Rebuild wireframe if the overlay is already enabled by the user
+                    // Rebuild element outlines (always-on) and optional wireframe overlay
+                    RebuildOutline();
                     if (WireframeToggle?.IsChecked == true)
                         RebuildWireframe();
 
@@ -418,7 +421,8 @@ namespace IfcViewer.UI
             _viewerHost.IfcRoot.Children.Remove(selected.SceneGroup);
             _loadedModels.Remove(selected);
 
-            // Rebuild wireframe without the removed model's edges
+            // Rebuild outline and optional wireframe without the removed model's edges
+            RebuildOutline();
             if (WireframeToggle?.IsChecked == true) RebuildWireframe();
 
             UpdateStatus(_loadedModels.Count == 0
@@ -514,7 +518,6 @@ namespace IfcViewer.UI
             }
 
             _revitModel = model;
-            SetGroupOutline(_revitModel.SceneGroup, NormalOutlineEffect);
             _sectionMgr?.RegisterGroup(_revitModel.SceneGroup);
             UpdateSectionBounds();
 
@@ -533,7 +536,8 @@ namespace IfcViewer.UI
 
             if (fitCamera) _viewerHost.FitView(model.Bounds);
 
-            // Rebuild wireframe if the overlay is already enabled by the user
+            // Rebuild element outlines (always-on) and optional wireframe overlay
+            RebuildOutline();
             if (WireframeToggle?.IsChecked == true)
                 RebuildWireframe();
 
@@ -596,7 +600,6 @@ namespace IfcViewer.UI
                     onProgress: msg => UpdateStatus(msg));
 
                 _viewerHost.IfcRoot.Children.Add(newModel.SceneGroup);
-                SetGroupOutline(newModel.SceneGroup, NormalOutlineEffect);
                 _loadedModels.Add(newModel);
                 ModelListBox.SelectedItem = newModel;
 
@@ -608,7 +611,8 @@ namespace IfcViewer.UI
                 UpdateSectionBounds();
                 // Don't move the camera on reload — user keeps their current view position.
 
-                // Rebuild wireframe for the freshly reloaded geometry
+                // Rebuild element outlines and optional wireframe for the freshly reloaded geometry
+                RebuildOutline();
                 if (WireframeToggle?.IsChecked == true)
                     RebuildWireframe();
 
@@ -689,18 +693,11 @@ namespace IfcViewer.UI
             ClearSelection();
         }
 
-        /// <summary>
-        /// Shared highlight logic — teal emissive glow + teal border outline on
-        /// <paramref name="mesh"/>.  Saves and restores both the emissive colour and
-        /// the PostEffects outline so the previous selection is cleanly un-highlighted.
-        /// </summary>
+        /// <summary>Shared highlight logic — teal emissive glow on <paramref name="mesh"/>.</summary>
         private void HighlightMesh(MeshGeometryModel3D mesh)
         {
-            // Restore the previous selection's emissive colour and outline.
             if (_selectedMesh != null && _selectedMesh.Material is PhongMaterial prev)
                 prev.EmissiveColor = _selectedOriginalEmissive;
-            if (_selectedMesh != null)
-                _selectedMesh.PostEffects = _selectedOriginalPostEffects;
 
             _selectedMesh = mesh;
 
@@ -709,10 +706,6 @@ namespace IfcViewer.UI
                 _selectedOriginalEmissive = mat.EmissiveColor;
                 mat.EmissiveColor = new Color4(0.08f, 0.42f, 0.42f, 1f);
             }
-
-            // Override the normal dark border with a bright teal selection border.
-            _selectedOriginalPostEffects = mesh.PostEffects ?? string.Empty;
-            mesh.PostEffects = SelectedOutlineEffect;
         }
 
         private void SelectElement(MeshGeometryModel3D mesh, IfcElementInfo info)
@@ -734,8 +727,6 @@ namespace IfcViewer.UI
         {
             if (_selectedMesh != null && _selectedMesh.Material is PhongMaterial mat)
                 mat.EmissiveColor = _selectedOriginalEmissive;
-            if (_selectedMesh != null)
-                _selectedMesh.PostEffects = _selectedOriginalPostEffects;
 
             _selectedMesh = null;
             HideProperties();
@@ -994,35 +985,66 @@ namespace IfcViewer.UI
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
+        // ── Always-on element outline ─────────────────────────────────────────
+        // Uses a higher dihedral-angle threshold (60°) than the wireframe toggle
+        // (30°) so only the sharpest structural silhouette edges show — giving a
+        // clean "outline" look rather than the detailed wireframe.
+        private void RebuildOutline()
+        {
+            if (_outlineRoot == null) return;
+            _outlineRoot.Children.Clear();
+
+            var meshList = new List<MeshGeometry3D>();
+            CollectMeshGeometries(_sceneRoot, meshList);
+
+            if (meshList.Count == 0) return;
+            SessionLogger.Info($"Outline — extracting silhouette edges from {meshList.Count} mesh(es).");
+
+            Task.Run(() =>
+            {
+                var lineGeoms = new List<LineGeometry3D>(meshList.Count);
+                foreach (var mg in meshList)
+                {
+                    var lg = WireframeHelper.ExtractHardEdges(mg, thresholdDegrees: 60f);
+                    if (lg != null) lineGeoms.Add(lg);
+                }
+                return lineGeoms;
+            }).ContinueWith(t =>
+            {
+                if (t.IsFaulted)
+                {
+                    SessionLogger.Error("Outline edge extraction failed.", t.Exception?.GetBaseException());
+                    return;
+                }
+
+                _outlineRoot.Children.Clear();
+                foreach (var lg in t.Result)
+                {
+                    _outlineRoot.Children.Add(new LineGeometryModel3D
+                    {
+                        Geometry  = lg,
+                        Color     = System.Windows.Media.Color.FromRgb(0x22, 0x22, 0x22),
+                        Thickness = 1.0,
+                    });
+                }
+                SessionLogger.Info($"Outline overlay: {t.Result.Count} line object(s).");
+            }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
         /// <summary>
         /// Recursively collects all <see cref="MeshGeometry3D"/> geometry objects from
-        /// the scene hierarchy, skipping <see cref="_wireframeRoot"/> (line nodes only).
+        /// the scene hierarchy, skipping line-only overlay roots.
         /// </summary>
         private void CollectMeshGeometries(GroupModel3D group, List<MeshGeometry3D> results)
         {
             foreach (var child in group.Children)
             {
                 if (ReferenceEquals(child, _wireframeRoot)) continue;
+                if (ReferenceEquals(child, _outlineRoot))   continue;
                 if (child is MeshGeometryModel3D m && m.Geometry is MeshGeometry3D mg)
                     results.Add(mg);
                 else if (child is GroupModel3D sub)
                     CollectMeshGeometries(sub, results);
-            }
-        }
-
-        /// <summary>
-        /// Recursively sets <see cref="MeshGeometryModel3D.PostEffects"/> on every mesh
-        /// in <paramref name="group"/> to produce a visible element outline in the
-        /// normal (non-wireframe) view.  Pass <c>null</c> or <c>""</c> to clear.
-        /// </summary>
-        private static void SetGroupOutline(GroupModel3D group, string effect)
-        {
-            foreach (var child in group.Children)
-            {
-                if (child is MeshGeometryModel3D mesh)
-                    mesh.PostEffects = effect ?? string.Empty;
-                else if (child is GroupModel3D sub)
-                    SetGroupOutline(sub, effect);
             }
         }
 

@@ -34,6 +34,13 @@ namespace IfcViewer.Viewer
         /// <summary>Perspective field of view in degrees.</summary>
         public double FieldOfView { get; set; } = 45.0;
 
+        // ── Window geometry ───────────────────────────────────────────────────
+        /// <summary>Saved window position and size. Null = use XAML defaults.</summary>
+        public double? WindowLeft   { get; set; }
+        public double? WindowTop    { get; set; }
+        public double? WindowWidth  { get; set; }
+        public double? WindowHeight { get; set; }
+
         // ── Serialization ──────────────────────────────────────────────────────
 
         /// <summary>Path to the persisted settings JSON file in AppData.</summary>

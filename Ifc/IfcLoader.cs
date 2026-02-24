@@ -366,8 +366,11 @@ namespace IfcViewer.Ifc
                 }));
             }
 
-            // Wait for all BeginInvoke dispatches to complete before computing bounds.
-            uiDispatcher.Invoke(DispatcherPriority.Normal, new Action(() => { }));
+            // Wait for all BeginInvoke(Background) dispatches to complete.
+            // ContextIdle priority (3) is LOWER than Background (4), so this only
+            // executes after all queued Background callbacks have finished — ensuring
+            // both allBounds and elementMap are fully populated before we return.
+            uiDispatcher.Invoke(DispatcherPriority.ContextIdle, new Action(() => { }));
 
             BoundingBox bounds = allBounds.Count > 0
                 ? allBounds.Aggregate(BoundingBox.Merge)

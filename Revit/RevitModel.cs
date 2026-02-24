@@ -33,9 +33,16 @@ namespace IfcViewer.Revit
         /// </summary>
         public IReadOnlyDictionary<ElementId, MeshGeometryModel3D> ElementMeshes { get; }
 
+        /// <summary>
+        /// Maps each exported Revit ElementId to its extracted element properties.
+        /// Used by the properties panel when the user clicks an element.
+        /// </summary>
+        public IReadOnlyDictionary<ElementId, RevitElementInfo> ElementInfos { get; }
+
         public RevitModel(string displayName, GroupModel3D sceneGroup,
                           BoundingBox bounds, int meshCount, int triangleCount,
-                          IReadOnlyDictionary<ElementId, MeshGeometryModel3D> elementMeshes = null)
+                          IReadOnlyDictionary<ElementId, MeshGeometryModel3D> elementMeshes = null,
+                          IReadOnlyDictionary<ElementId, RevitElementInfo> elementInfos = null)
         {
             DisplayName   = displayName;
             SceneGroup    = sceneGroup;
@@ -43,6 +50,7 @@ namespace IfcViewer.Revit
             MeshCount     = meshCount;
             TriangleCount = triangleCount;
             ElementMeshes = elementMeshes ?? new Dictionary<ElementId, MeshGeometryModel3D>();
+            ElementInfos  = elementInfos  ?? new Dictionary<ElementId, RevitElementInfo>();
         }
 
         public override string ToString() => DisplayName;

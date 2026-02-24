@@ -8,6 +8,7 @@ using SharpDX;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows;
@@ -65,12 +66,14 @@ namespace IfcViewer.UI
         private IfcModel _pendingReload;
 
         // Stage 5: Element selection + properties panel
-        // Flat map of all loaded IFC meshes → their extracted element info.
-        // Maintained in sync with _loadedModels.
-        private readonly Dictionary<MeshGeometryModel3D, IfcElementInfo> _ifcElementMap
+        // Flat maps of all loaded meshes → their extracted element info.
+        // IFC map maintained in sync with _loadedModels; Revit map rebuilt on each sync.
+        private readonly Dictionary<MeshGeometryModel3D, IfcElementInfo>   _ifcElementMap
             = new Dictionary<MeshGeometryModel3D, IfcElementInfo>();
-        private MeshGeometryModel3D _selectedMesh;
-        private Color4 _selectedOriginalEmissive;
+        private readonly Dictionary<MeshGeometryModel3D, RevitElementInfo> _revitElementMap
+            = new Dictionary<MeshGeometryModel3D, RevitElementInfo>();
+        private MeshGeometryModel3D  _selectedMesh;
+        private Color4               _selectedOriginalEmissive;
         private System.Windows.Point _selectionMouseDown;
 
         // ── Constructor ───────────────────────────────────────────────────────
@@ -130,11 +133,12 @@ namespace IfcViewer.UI
                 _viewport.MouseDown += (s, ev) => _viewport.Focus();
                 ViewportContainer.Children.Insert(0, _viewport);
 
-                // Hook left-click for element selection.
-                // MouseLeftButtonDown records the down position so we can distinguish
-                // clicks from camera-orbit drags in MouseLeftButtonUp.
-                _viewport.MouseLeftButtonDown += Viewport_MouseLeftButtonDown;
-                _viewport.MouseLeftButtonUp   += Viewport_MouseLeftButtonUp;
+                // Hook left-click for element selection using PREVIEW (tunnel) events.
+                // Bubble events (MouseLeftButtonDown/Up) may be consumed by Helix's
+                // CameraController child before they reach our handlers; Preview events
+                // fire top-down, reaching the viewport before any child sees them.
+                _viewport.PreviewMouseLeftButtonDown += Viewport_MouseLeftButtonDown;
+                _viewport.PreviewMouseLeftButtonUp   += Viewport_MouseLeftButtonUp;
 
                 // 5a. Wire custom mouse bindings once the template is applied.
                 //     UseDefaultGestures=false clears Helix's built-ins; we re-add only
@@ -201,6 +205,7 @@ namespace IfcViewer.UI
                 // 10. Load settings from disk (or defaults) and apply them
                 _settings = ViewerSettings.Load();
                 ApplySettings();
+                RestoreWindowGeometry(_settings);
 
                 // NOTE: WireframeToggle will be enabled when IFC or Revit geometry loads
                 // (see AddIfc_Click, ApplyRevitUpdate). We don't enable it here because
@@ -225,6 +230,16 @@ namespace IfcViewer.UI
         {
             try
             {
+                // Persist window geometry so it reopens in the same position/size.
+                if (_settings != null)
+                {
+                    _settings.WindowLeft   = Left;
+                    _settings.WindowTop    = Top;
+                    _settings.WindowWidth  = Width;
+                    _settings.WindowHeight = Height;
+                    _settings.Save();
+                }
+
                 // Stop auto-sync and dispose file watchers before tearing down the scene.
                 _syncRevitEvent?.StopAutoSync();
                 foreach (var w in _fileWatchers.Values) w.Dispose();
@@ -233,6 +248,7 @@ namespace IfcViewer.UI
                 // Clear selection state so no stale material references remain.
                 _selectedMesh = null;
                 _ifcElementMap.Clear();
+                _revitElementMap.Clear();
 
                 this.PreviewMouseWheel -= OnPreviewMouseWheel;
                 _fpController?.Dispose();
@@ -471,6 +487,19 @@ namespace IfcViewer.UI
             _sectionMgr?.RegisterGroup(_revitModel.SceneGroup);
             UpdateSectionBounds();
 
+            // Rebuild the mesh → info reverse-map for hit-testing.
+            // If the currently selected mesh was a Revit element that no longer
+            // exists after an incremental patch, clear the selection.
+            _revitElementMap.Clear();
+            foreach (var kv in model.ElementMeshes)
+            {
+                if (model.ElementInfos.TryGetValue(kv.Key, out var info))
+                    _revitElementMap[kv.Value] = info;
+            }
+            if (_selectedMesh != null && !_ifcElementMap.ContainsKey(_selectedMesh)
+                                      && !_revitElementMap.ContainsKey(_selectedMesh))
+                ClearSelection();
+
             if (fitCamera) _viewerHost.FitView(model.Bounds);
 
             // Enable wireframe overlay on first Revit export; rebuild on incremental updates
@@ -607,27 +636,32 @@ namespace IfcViewer.UI
 
             // Hit-test the 3D scene at the click position.
             var hits = _viewport?.FindHits(pos);
+
             if (hits == null || hits.Count == 0) { ClearSelection(); return; }
 
             foreach (var hit in hits)
             {
                 var mesh = hit.ModelHit as MeshGeometryModel3D;
-                if (mesh != null && _ifcElementMap.TryGetValue(mesh, out IfcElementInfo info))
+                if (mesh == null) continue;
+
+                if (_ifcElementMap.TryGetValue(mesh, out IfcElementInfo ifcInfo))
                 {
-                    SelectElement(mesh, info);
+                    SelectElement(mesh, ifcInfo);
+                    return;
+                }
+                if (_revitElementMap.TryGetValue(mesh, out RevitElementInfo revitInfo))
+                {
+                    SelectElement(mesh, revitInfo);
                     return;
                 }
             }
 
-            // Click landed on geometry that has no entry in the element map
-            // (e.g. Revit meshes, section plane visual). Clear any current selection.
             ClearSelection();
         }
 
-        /// <summary>Highlights <paramref name="mesh"/> and shows its properties.</summary>
-        private void SelectElement(MeshGeometryModel3D mesh, IfcElementInfo info)
+        /// <summary>Shared highlight logic — teal emissive glow on <paramref name="mesh"/>.</summary>
+        private void HighlightMesh(MeshGeometryModel3D mesh)
         {
-            // Restore previous selection's original emissive colour.
             if (_selectedMesh != null && _selectedMesh.Material is PhongMaterial prev)
                 prev.EmissiveColor = _selectedOriginalEmissive;
 
@@ -636,12 +670,22 @@ namespace IfcViewer.UI
             if (mesh.Material is PhongMaterial mat)
             {
                 _selectedOriginalEmissive = mat.EmissiveColor;
-                // Teal emissive glow — matches the UI accent colour.
                 mat.EmissiveColor = new Color4(0.08f, 0.42f, 0.42f, 1f);
             }
+        }
 
+        private void SelectElement(MeshGeometryModel3D mesh, IfcElementInfo info)
+        {
+            HighlightMesh(mesh);
             ShowElementProperties(info);
-            SessionLogger.Info($"Selected: {info.Type} \"{info.Name}\"");
+            SessionLogger.Info($"Selected IFC: {info.Type} \"{info.Name}\"");
+        }
+
+        private void SelectElement(MeshGeometryModel3D mesh, RevitElementInfo info)
+        {
+            HighlightMesh(mesh);
+            ShowElementProperties(info);
+            SessionLogger.Info($"Selected Revit: {info.Category} \"{info.Name}\"");
         }
 
         /// <summary>Removes the current highlight and clears the properties panel.</summary>
@@ -651,35 +695,66 @@ namespace IfcViewer.UI
                 mat.EmissiveColor = _selectedOriginalEmissive;
 
             _selectedMesh = null;
-            ShowElementProperties(null);
+            HideProperties();
         }
 
         /// <summary>
-        /// Populates the right-hand properties panel.
+        /// Populates the right-hand properties panel for an IFC element.
         /// Pass <c>null</c> to return to the "click an element" empty state.
         /// </summary>
         private void ShowElementProperties(IfcElementInfo info)
         {
-            if (info == null)
+            if (info == null) { HideProperties(); return; }
+
+            ShowProperties(
+                name:       string.IsNullOrWhiteSpace(info.Name) ? "(unnamed)" : info.Name,
+                typeLine:   info.Type,
+                idLine:     info.GlobalId,
+                propertySets: info.PropertySets);
+        }
+
+        /// <summary>Populates the right-hand properties panel for a Revit element.</summary>
+        private void ShowElementProperties(RevitElementInfo info)
+        {
+            if (info == null) { HideProperties(); return; }
+
+            string typeLine = string.IsNullOrWhiteSpace(info.FamilyName)
+                ? info.Category
+                : $"{info.Category}  •  {info.FamilyName} : {info.TypeName}";
+
+            ShowProperties(
+                name:         string.IsNullOrWhiteSpace(info.Name) ? "(unnamed)" : info.Name,
+                typeLine:     typeLine,
+                idLine:       $"ElementId {info.ElementId}",
+                propertySets: info.PropertySets);
+        }
+
+        private void HideProperties()
+        {
+            PropEmptyHint.Visibility  = Visibility.Visible;
+            PropContent.Visibility    = Visibility.Collapsed;
+            PropTabContent.Visibility = Visibility.Collapsed;
+        }
+
+        private void ShowProperties(string name, string typeLine, string idLine,
+                                    Dictionary<string, Dictionary<string, string>> propertySets)
+        {
+            PropEmptyHint.Visibility  = Visibility.Collapsed;
+            PropContent.Visibility    = Visibility.Visible;
+            PropTabContent.Visibility = Visibility.Visible;
+
+            PropName.Text     = name;
+            PropType.Text     = typeLine;
+            PropGlobalId.Text = idLine;
+
+            PropTabBar.Children.Clear();
+            PropTabOverflowPanel.Children.Clear();
+            PropPropsPanel.Children.Clear();
+            PropTabOverflowPopup.IsOpen = false;
+
+            if (propertySets.Count == 0)
             {
-                PropEmptyHint.Visibility = Visibility.Visible;
-                PropContent.Visibility   = Visibility.Collapsed;
-                return;
-            }
-
-            PropEmptyHint.Visibility = Visibility.Collapsed;
-            PropContent.Visibility   = Visibility.Visible;
-
-            PropName.Text     = string.IsNullOrWhiteSpace(info.Name) ? "(unnamed)" : info.Name;
-            PropType.Text     = info.Type;
-            PropGlobalId.Text = info.GlobalId;
-
-            // Rebuild property-set rows from scratch each time.
-            PropSetsPanel.Children.Clear();
-
-            if (info.PropertySets.Count == 0)
-            {
-                PropSetsPanel.Children.Add(new TextBlock
+                PropPropsPanel.Children.Add(new TextBlock
                 {
                     Text       = "No property sets found.",
                     FontSize   = 10,
@@ -689,49 +764,124 @@ namespace IfcViewer.UI
                 return;
             }
 
-            foreach (var pset in info.PropertySets)
+            // Build one tab + one overflow item per property set.
+            var psets = propertySets.ToList();
+            Border firstTab = null;
+            foreach (var pset in psets)
             {
-                // Pset name header
-                PropSetsPanel.Children.Add(new TextBlock
+                var capturedProps = pset.Value;
+
+                // ── Tab in the tab bar ────────────────────────────────────────
+                var tabLabel = new TextBlock
                 {
-                    Text       = pset.Key,
-                    FontSize   = 10,
-                    FontWeight = FontWeights.SemiBold,
-                    Foreground = (Brush)FindResource("ForegroundBrush"),
-                    Margin     = new Thickness(0, 8, 0, 3),
-                });
-
-                foreach (var prop in pset.Value)
+                    Text              = pset.Key,
+                    FontSize          = 10,
+                    VerticalAlignment = VerticalAlignment.Center,
+                };
+                var tab = new Border
                 {
-                    // Two-column row: property name (left) | value (right)
-                    var row = new Grid { Margin = new Thickness(0, 1, 0, 1) };
-                    row.ColumnDefinitions.Add(new ColumnDefinition
-                        { Width = new GridLength(1, GridUnitType.Star) });
-                    row.ColumnDefinitions.Add(new ColumnDefinition
-                        { Width = new GridLength(1.2, GridUnitType.Star) });
+                    Padding         = new Thickness(10, 7, 10, 5),
+                    BorderThickness = new Thickness(0, 0, 0, 2),
+                    BorderBrush     = Brushes.Transparent,
+                    Background      = Brushes.Transparent,
+                    Cursor          = Cursors.Hand,
+                    Child           = tabLabel,
+                };
+                tab.MouseLeftButtonDown += (_, __) => SelectPropTab(tab, capturedProps);
+                PropTabBar.Children.Add(tab);
+                if (firstTab == null) firstTab = tab;
 
-                    var nameBlock = new TextBlock
-                    {
-                        Text         = prop.Key,
-                        FontSize     = 10,
-                        Foreground   = (Brush)FindResource("IconBrush"),
-                        TextTrimming = TextTrimming.CharacterEllipsis,
-                        ToolTip      = prop.Key,
-                    };
-                    var valBlock = new TextBlock
-                    {
-                        Text        = prop.Value,
-                        FontSize    = 10,
-                        Foreground  = (Brush)FindResource("ForegroundBrush"),
-                        TextWrapping = TextWrapping.Wrap,
-                    };
+                // ── Matching row in the overflow dropdown ─────────────────────
+                var capturedTab = tab;
+                var itemLabel = new TextBlock
+                {
+                    Text              = pset.Key,
+                    FontSize          = 10,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Foreground        = (Brush)FindResource("ForegroundBrush"),
+                };
+                var item = new Border
+                {
+                    Padding    = new Thickness(14, 7, 14, 7),
+                    Background = Brushes.Transparent,
+                    Cursor     = Cursors.Hand,
+                    Child      = itemLabel,
+                };
+                item.MouseEnter += (_, __) =>
+                    item.Background = new SolidColorBrush(
+                        System.Windows.Media.Color.FromArgb(30, 255, 255, 255));
+                item.MouseLeave += (_, __) =>
+                    item.Background = Brushes.Transparent;
+                item.MouseLeftButtonDown += (_, __) =>
+                {
+                    SelectPropTab(capturedTab, capturedProps);
+                    capturedTab.BringIntoView();
+                    PropTabOverflowPopup.IsOpen = false;
+                };
+                PropTabOverflowPanel.Children.Add(item);
+            }
 
-                    Grid.SetColumn(nameBlock, 0);
-                    Grid.SetColumn(valBlock, 1);
-                    row.Children.Add(nameBlock);
-                    row.Children.Add(valBlock);
-                    PropSetsPanel.Children.Add(row);
-                }
+            // Activate the first tab by default.
+            if (firstTab != null)
+                SelectPropTab(firstTab, psets[0].Value);
+        }
+
+        private void PropTabOverflow_Click(object sender, MouseButtonEventArgs e)
+        {
+            PropTabOverflowPopup.IsOpen = !PropTabOverflowPopup.IsOpen;
+        }
+
+        /// <summary>
+        /// Highlights the active tab with a teal underline and rebuilds
+        /// <see cref="PropPropsPanel"/> with that tab's properties.
+        /// </summary>
+        private void SelectPropTab(Border activeTab, Dictionary<string, string> props)
+        {
+            var teal = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x70, 0xBA, 0xBC));
+            var dim  = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xAA, 0xAA, 0xAA));
+
+            foreach (Border tab in PropTabBar.Children)
+            {
+                bool active = tab == activeTab;
+                tab.BorderBrush = active ? teal : Brushes.Transparent;
+                if (tab.Child is TextBlock tb)
+                    tb.Foreground = active ? teal : dim;
+            }
+
+            // Scroll the tab bar so the active tab is visible.
+            activeTab.BringIntoView();
+
+            PropPropsPanel.Children.Clear();
+
+            foreach (var prop in props)
+            {
+                var row = new Grid { Margin = new Thickness(0, 2, 0, 2) };
+                row.ColumnDefinitions.Add(new ColumnDefinition
+                    { Width = new GridLength(1, GridUnitType.Star) });
+                row.ColumnDefinitions.Add(new ColumnDefinition
+                    { Width = new GridLength(1.2, GridUnitType.Star) });
+
+                var nameBlock = new TextBlock
+                {
+                    Text         = prop.Key,
+                    FontSize     = 10,
+                    Foreground   = (Brush)FindResource("IconBrush"),
+                    TextTrimming = TextTrimming.CharacterEllipsis,
+                    ToolTip      = prop.Key,
+                };
+                var valBlock = new TextBlock
+                {
+                    Text         = prop.Value,
+                    FontSize     = 10,
+                    Foreground   = (Brush)FindResource("ForegroundBrush"),
+                    TextWrapping = TextWrapping.Wrap,
+                };
+
+                Grid.SetColumn(nameBlock, 0);
+                Grid.SetColumn(valBlock,  1);
+                row.Children.Add(nameBlock);
+                row.Children.Add(valBlock);
+                PropPropsPanel.Children.Add(row);
             }
         }
 
@@ -1000,6 +1150,34 @@ namespace IfcViewer.UI
                 Owner = this
             };
             win.Show();
+        }
+
+        /// <summary>
+        /// Restore the window to its last saved position and size.
+        /// Clamps to the virtual screen so the window is never off-screen.
+        /// </summary>
+        private void RestoreWindowGeometry(ViewerSettings s)
+        {
+            if (s.WindowWidth == null || s.WindowHeight == null) return;
+
+            double screenW = SystemParameters.VirtualScreenWidth;
+            double screenH = SystemParameters.VirtualScreenHeight;
+            double screenX = SystemParameters.VirtualScreenLeft;
+            double screenY = SystemParameters.VirtualScreenTop;
+
+            double w = Math.Max(MinWidth,  Math.Min(s.WindowWidth.Value,  screenW));
+            double h = Math.Max(MinHeight, Math.Min(s.WindowHeight.Value, screenH));
+            double l = s.WindowLeft ?? ((screenW - w) / 2 + screenX);
+            double t = s.WindowTop  ?? ((screenH - h) / 2 + screenY);
+
+            // Clamp so at least the title bar (top 40px) stays on screen.
+            l = Math.Max(screenX, Math.Min(l, screenX + screenW - w));
+            t = Math.Max(screenY, Math.Min(t, screenY + screenH - 40));
+
+            Left   = l;
+            Top    = t;
+            Width  = w;
+            Height = h;
         }
 
         /// <summary>

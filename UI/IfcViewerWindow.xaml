@@ -363,52 +363,108 @@
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
 
+                            <!-- Row 0: panel header -->
                             <TextBlock Grid.Row="0"
                                        Text="PROPERTIES"
                                        FontSize="11" FontWeight="SemiBold"
                                        Foreground="{DynamicResource IconBrush}"
                                        Margin="8,8,8,4"/>
 
-                            <ScrollViewer Grid.Row="1"
-                                          VerticalScrollBarVisibility="Auto"
-                                          HorizontalScrollBarVisibility="Disabled">
-                                <StackPanel Margin="8,4,8,8">
+                            <!-- Row 1: empty hint OR element identity + tab bar -->
+                            <StackPanel Grid.Row="1" Margin="8,0,8,0">
 
-                                    <!-- Empty state — shown when nothing is selected -->
-                                    <TextBlock x:Name="PropEmptyHint"
-                                               Text="Click an element in the viewport to view its properties."
-                                               Foreground="{DynamicResource IconBrush}"
-                                               FontSize="10"
+                                <TextBlock x:Name="PropEmptyHint"
+                                           Text="Click an element in the viewport to view its properties."
+                                           Foreground="{DynamicResource IconBrush}"
+                                           FontSize="10"
+                                           TextWrapping="Wrap"
+                                           Margin="0,4,0,0"/>
+
+                                <StackPanel x:Name="PropContent" Visibility="Collapsed">
+                                    <TextBlock x:Name="PropName"
+                                               FontSize="12" FontWeight="SemiBold"
+                                               Foreground="{DynamicResource ForegroundBrush}"
                                                TextWrapping="Wrap"
-                                               Margin="0,4,0,0"/>
+                                               Margin="0,4,0,2"/>
+                                    <TextBlock x:Name="PropType"
+                                               FontSize="10"
+                                               Foreground="{DynamicResource IconBrush}"
+                                               Margin="0,0,0,2"/>
+                                    <TextBlock x:Name="PropGlobalId"
+                                               FontSize="9"
+                                               Foreground="{DynamicResource IconBrush}"
+                                               TextWrapping="Wrap"
+                                               Margin="0,0,0,6"/>
+                                    <Separator Background="{DynamicResource BorderBrush}"
+                                               Margin="-8,0,-8,0"/>
+                                    <!-- Tab bar — tabs + overflow chevron button -->
+                                    <Grid Margin="-8,0,-8,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
 
-                                    <!-- Element details — shown when an element is selected -->
-                                    <StackPanel x:Name="PropContent" Visibility="Collapsed">
-                                        <TextBlock x:Name="PropName"
-                                                   FontSize="12" FontWeight="SemiBold"
-                                                   Foreground="{DynamicResource ForegroundBrush}"
-                                                   TextWrapping="Wrap"
-                                                   Margin="0,4,0,2"/>
-                                        <TextBlock x:Name="PropType"
-                                                   FontSize="10"
-                                                   Foreground="{DynamicResource IconBrush}"
-                                                   Margin="0,0,0,2"/>
-                                        <TextBlock x:Name="PropGlobalId"
-                                                   FontSize="9"
-                                                   Foreground="{DynamicResource IconBrush}"
-                                                   TextWrapping="Wrap"
-                                                   Margin="0,0,0,8"/>
-                                        <Separator Background="{DynamicResource BorderBrush}"
-                                                   Margin="0,0,0,4"/>
-                                        <!-- Property sets populated dynamically in code-behind -->
-                                        <StackPanel x:Name="PropSetsPanel"/>
-                                    </StackPanel>
+                                        <!-- Tabs; scrollable but bar hidden — BringIntoView handles navigation -->
+                                        <ScrollViewer x:Name="PropTabScroll"
+                                                      Grid.Column="0"
+                                                      HorizontalScrollBarVisibility="Hidden"
+                                                      VerticalScrollBarVisibility="Disabled">
+                                            <StackPanel x:Name="PropTabBar" Orientation="Horizontal"/>
+                                        </ScrollViewer>
 
+                                        <!-- Overflow chevron — opens the category dropdown -->
+                                        <Border x:Name="PropTabOverflowBtn"
+                                                Grid.Column="1"
+                                                Width="26"
+                                                Background="Transparent"
+                                                Cursor="Hand"
+                                                VerticalAlignment="Stretch"
+                                                ToolTip="All categories"
+                                                MouseLeftButtonDown="PropTabOverflow_Click">
+                                            <materialDesign:PackIcon Kind="ChevronDown"
+                                                                     Width="14" Height="14"
+                                                                     Foreground="{DynamicResource IconBrush}"
+                                                                     HorizontalAlignment="Center"
+                                                                     VerticalAlignment="Center"/>
+                                        </Border>
+
+                                        <!-- Dropdown listing all categories -->
+                                        <Popup x:Name="PropTabOverflowPopup"
+                                               Grid.Column="1"
+                                               PlacementTarget="{Binding ElementName=PropTabOverflowBtn}"
+                                               Placement="Bottom"
+                                               StaysOpen="True"
+                                               AllowsTransparency="True">
+                                            <Border Background="{DynamicResource SecondaryBackgroundBrush}"
+                                                    BorderBrush="{DynamicResource BorderBrush}"
+                                                    BorderThickness="1">
+                                                <ScrollViewer MaxHeight="240"
+                                                              VerticalScrollBarVisibility="Auto"
+                                                              HorizontalScrollBarVisibility="Disabled">
+                                                    <StackPanel x:Name="PropTabOverflowPanel" MinWidth="160"/>
+                                                </ScrollViewer>
+                                            </Border>
+                                        </Popup>
+                                    </Grid>
+                                    <Separator Background="{DynamicResource BorderBrush}"
+                                               Margin="-8,0,-8,0"/>
                                 </StackPanel>
+
+                            </StackPanel>
+
+                            <!-- Row 2: scrollable property rows for the active tab -->
+                            <ScrollViewer x:Name="PropTabContent"
+                                          Grid.Row="2"
+                                          VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled"
+                                          Visibility="Collapsed">
+                                <StackPanel x:Name="PropPropsPanel" Margin="8,6,8,8"/>
                             </ScrollViewer>
+
                         </Grid>
                     </Border>
 

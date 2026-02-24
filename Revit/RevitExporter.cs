@@ -118,7 +118,7 @@ namespace IfcViewer.Revit
 
             SessionLogger.Info($"RevitExporter: {triCount} triangles — scene ready.");
             return new RevitModel(viewName, sceneGroup, bounds,
-                elementMeshes.Count, triCount, elementMeshes);
+                elementMeshes.Count, triCount, elementMeshes, ctx.ElementInfos);
         }
 
         // ── Incremental scene patcher (UI thread) ─────────────────────────────
@@ -133,6 +133,8 @@ namespace IfcViewer.Revit
             // constructor overload was added in .NET 8; IDictionary exists on all targets).
             var elementMeshes = new Dictionary<ElementId, MeshGeometryModel3D>(
                 (IDictionary<ElementId, MeshGeometryModel3D>)previous.ElementMeshes);
+            var elementInfos  = new Dictionary<ElementId, RevitElementInfo>(
+                (IDictionary<ElementId, RevitElementInfo>)previous.ElementInfos);
             var sceneGroup    = previous.SceneGroup;
             int triCount      = previous.TriangleCount;
 
@@ -145,6 +147,7 @@ namespace IfcViewer.Revit
                     sceneGroup.Children.Remove(old);
                     triCount -= old.Geometry?.Indices?.Count / 3 ?? 0;
                     elementMeshes.Remove(id);
+                    elementInfos.Remove(id);
                 }
             }
 
@@ -166,6 +169,10 @@ namespace IfcViewer.Revit
                 sceneGroup.Children.Add(newMesh);
                 elementMeshes[kv.Key] = newMesh;
                 triCount += bucket.Indices.Count / 3;
+
+                // Update element info for modified/added elements
+                if (ctx.ElementInfos.TryGetValue(kv.Key, out var info))
+                    elementInfos[kv.Key] = info;
             }
 
             // Recalculate bounds from all surviving meshes
@@ -184,7 +191,7 @@ namespace IfcViewer.Revit
                 : previous.Bounds;
 
             return new RevitModel(previous.DisplayName, sceneGroup, bounds,
-                elementMeshes.Count, triCount, elementMeshes);
+                elementMeshes.Count, triCount, elementMeshes, elementInfos);
         }
 
         // ── Shared mesh factory ───────────────────────────────────────────────
@@ -223,8 +230,10 @@ namespace IfcViewer.Revit
     internal sealed class RevitExportContext : IExportContext
     {
         // ── Output ───────────────────────────────────────────────────────────
-        public readonly Dictionary<ElementId, ElementBucket> ElementBuckets
+        public readonly Dictionary<ElementId, ElementBucket>     ElementBuckets
             = new Dictionary<ElementId, ElementBucket>();
+        public readonly Dictionary<ElementId, RevitElementInfo>  ElementInfos
+            = new Dictionary<ElementId, RevitElementInfo>();
         public int FaceCount { get; private set; }
 
         // ── Per-element state ────────────────────────────────────────────────
@@ -296,6 +305,10 @@ namespace IfcViewer.Revit
             }
 
             _currentColor = CategoryToColor(elem);
+
+            // Extract element properties for the selection panel.
+            ElementInfos[elementId] = ExtractElementInfo(elem, elementId);
+
             return RenderNodeAction.Proceed;
         }
 
@@ -406,6 +419,155 @@ namespace IfcViewer.Revit
 
         private Transform CurrentTransform
             => _transformStack.Count > 0 ? _transformStack.Peek() : Transform.Identity;
+
+        // ── Parameter-group label lookup ──────────────────────────────────────
+        // Maps the ForgeTypeId key (after ":", version stripped) to the exact
+        // Revit UI label as shown in the Properties panel (English).
+        private static readonly Dictionary<string, string> _groupLabelMap
+            = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["constraints"]              = "Constraints",
+            ["construction"]             = "Construction",
+            ["coupler"]                  = "Coupler",
+            ["data"]                     = "Data",
+            ["dimensions"]               = "Dimensions",
+            ["division"]                 = "Division Geometry",
+            ["electrical"]               = "Electrical",
+            ["electrical-analysis"]      = "Electrical - Analysis",
+            ["electrical-circuiting"]    = "Electrical - Circuiting",
+            ["electrical-lighting"]      = "Electrical - Lighting",
+            ["electrical-loads"]         = "Electrical - Loads",
+            ["energy-analysis"]          = "Energy Analysis",
+            ["fire-protection"]          = "Fire Protection",
+            ["general"]                  = "General",
+            ["geometry"]                 = "Geometry",
+            ["ifc"]                      = "IFC Parameters",
+            ["ifc-export-element"]       = "IFC Parameters",
+            ["ifc-properties"]           = "IFC Parameters",
+            ["identity-data"]            = "Identity Data",
+            ["infrastructure"]           = "Infrastructure",
+            ["layers"]                   = "Layers",
+            ["materials"]                = "Materials and Finishes",
+            ["mechanical"]               = "Mechanical",
+            ["mechanical-airflow"]       = "Mechanical - Airflow",
+            ["mechanical-loads"]         = "Mechanical - Loads",
+            ["phasing"]                  = "Phasing",
+            ["plumbing"]                 = "Plumbing",
+            ["primary-end"]              = "Structural Analysis - End 1",
+            ["secondary-end"]            = "Structural Analysis - End 2",
+            ["secondary"]                = "Structural Analysis - End 2",
+            ["structural"]               = "Structural",
+            ["structural-analysis"]      = "Structural Analysis",
+            ["structural-section"]       = "Structural - Section Geometry",
+            ["tags"]                     = "Tags",
+            ["text"]                     = "Text",
+            ["title"]                    = "Title",
+            ["visibility"]               = "Visibility",
+        };
+
+        /// <summary>
+        /// Strips the ForgeTypeId prefix and version suffix, returning just the key.
+        /// e.g. "autodesk.parameter.group:identity-data-1.0.0" → "identity-data"
+        /// </summary>
+        private static string ForgeGroupKey(ForgeTypeId typeId)
+        {
+            if (typeId == null) return "";
+            var s = typeId.TypeId ?? "";
+
+            // Strip namespace prefix up to and including ":"
+            var colon = s.LastIndexOf(':');
+            if (colon >= 0) s = s.Substring(colon + 1);
+
+            // Strip trailing version like "-1.0.0" or "-2" by walking backwards
+            // over digits and dots until we hit '-'
+            int i = s.Length - 1;
+            while (i >= 0 && (char.IsDigit(s[i]) || s[i] == '.')) i--;
+            if (i >= 0 && s[i] == '-') s = s.Substring(0, i);
+
+            return s.ToLowerInvariant(); // e.g. "identity-data"
+        }
+
+        private RevitElementInfo ExtractElementInfo(Element elem, ElementId elementId)
+        {
+            var info = new RevitElementInfo
+            {
+                Name      = elem.Name ?? "(unnamed)",
+                Category  = elem.Category?.Name ?? "",
+                ElementId = elementId.ToString(),
+            };
+
+            // Family / type names
+            try
+            {
+                if (elem is FamilyInstance fi)
+                    info.FamilyName = fi.Symbol?.FamilyName ?? "";
+
+                var typeId = elem.GetTypeId();
+                if (typeId != null && typeId != ElementId.InvalidElementId)
+                    info.TypeName = _doc.GetElement(typeId)?.Name ?? "";
+            }
+            catch { /* non-critical */ }
+
+            // Parameters — group by their parameter group label
+            try
+            {
+                foreach (Parameter param in elem.Parameters)
+                {
+                    if (param?.Definition == null) continue;
+
+                    // Resolve the formatted value
+                    string value = null;
+                    try
+                    {
+                        value = param.AsValueString();
+                        if (value == null)
+                        {
+                            switch (param.StorageType)
+                            {
+                                case StorageType.String:
+                                    value = param.AsString();
+                                    break;
+                                case StorageType.Integer:
+                                    value = param.AsInteger().ToString();
+                                    break;
+                                case StorageType.Double:
+                                    value = param.AsDouble().ToString("G6");
+                                    break;
+                                case StorageType.ElementId:
+                                    var refEl = _doc.GetElement(param.AsElementId());
+                                    value = refEl?.Name ?? param.AsElementId()?.ToString();
+                                    break;
+                            }
+                        }
+                    }
+                    catch { continue; }
+
+                    if (string.IsNullOrWhiteSpace(value)) continue;
+
+                    // Resolve the group label via the ForgeTypeId lookup map.
+                    string groupLabel = "Other";
+                    try
+                    {
+                        var key = ForgeGroupKey(param.Definition.GetGroupTypeId());
+                        if (!_groupLabelMap.TryGetValue(key, out groupLabel) || string.IsNullOrWhiteSpace(groupLabel))
+                            groupLabel = "Other";
+                    }
+                    catch { }
+
+                    if (!info.PropertySets.TryGetValue(groupLabel, out var group))
+                    {
+                        group = new Dictionary<string, string>();
+                        info.PropertySets[groupLabel] = group;
+                    }
+
+                    // Last-write wins when duplicate parameter names exist in the same group.
+                    group[param.Definition.Name] = value;
+                }
+            }
+            catch { /* ignore entire parameter block on unexpected error */ }
+
+            return info;
+        }
 
         private static Color4 CategoryToColor(Element elem)
         {

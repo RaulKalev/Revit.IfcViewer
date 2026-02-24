@@ -201,6 +201,9 @@ namespace IfcViewer.Revit
             var mat = new PhongMaterial
             {
                 DiffuseColor      = bucket.Colour,
+                // Small ambient floor so backlit faces receive a hint of light
+                // rather than going pitch-black; keeps colour legible on all sides.
+                AmbientColor      = new Color4(0.15f, 0.15f, 0.15f, 1f),
                 SpecularColor     = new Color4(0.05f, 0.05f, 0.05f, 1f),
                 SpecularShininess = 4f,
                 ReflectiveColor   = new Color4(0f, 0f, 0f, 0f),

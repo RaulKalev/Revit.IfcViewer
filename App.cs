@@ -34,7 +34,7 @@ namespace IfcViewer
             _ribbonPanel = application.CreateOrSelectPanel(tabName, "Tools");
 
             _ribbonPanel.CreatePushButton<IfcViewerCommand>()
-                .SetLargeImage("pack://application:,,,/IfcViewer;component/Assets/IfcViewer.png")
+                .SetLargeImage("pack://application:,,,/IfcViewer;component/Assets/IfcViewer.tiff")
                 .SetText("IFC\nViewer")
                 .SetToolTip("Launch the IFC Viewer")
                 .SetLongDescription("IfcViewer lets you load IFC files and compare them against your live Revit model in a GPU-accelerated 3D viewport.")

@@ -333,6 +333,9 @@ namespace IfcViewer.Ifc
                     var mat = new PhongMaterial
                     {
                         DiffuseColor      = capturedKey.ToColor4(),
+                        // Small ambient floor so backlit faces receive a hint of light
+                        // rather than going pitch-black; keeps colour legible on all sides.
+                        AmbientColor      = new Color4(0.15f, 0.15f, 0.15f, 1f),
                         // Minimal specular — purely technical viewer
                         SpecularColor     = new Color4(0.05f, 0.05f, 0.05f, 1f),
                         SpecularShininess = 4f,

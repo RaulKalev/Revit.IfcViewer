@@ -28,7 +28,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Resource Include="Assets\IfcViewer.png" />
+    <Resource Include="Assets\IfcViewer.tiff" />
   </ItemGroup>
 
   <ItemGroup>

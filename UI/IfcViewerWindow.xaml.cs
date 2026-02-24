@@ -184,6 +184,13 @@ namespace IfcViewer.UI
                 _settings = ViewerSettings.Load();
                 ApplySettings();
 
+                // Edge overlay on by default — hard-edge lines help distinguish object
+                // boundaries in the shaded view without requiring a manual toggle.
+                // RebuildWireframe() returns early here (no geometry loaded yet); the
+                // lifecycle hooks in AddIfc_Click / ApplyRevitUpdate build the overlay
+                // automatically as each model arrives.
+                if (WireframeToggle != null) WireframeToggle.IsChecked = true;
+
                 // 11. Intercept scroll wheel at Window level to implement instant, inertia-free
                 //     zoom. Mark e.Handled=true so Helix's smooth animated zoom never fires.
                 this.PreviewMouseWheel += OnPreviewMouseWheel;

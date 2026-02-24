@@ -1,0 +1,271 @@
+<Window x:Class="ProSchedules.UI.RenameWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008" 
+        xmlns:ui="clr-namespace:ProSchedules.UI"
+        xmlns:materialDesign="http://materialdesigninxaml.net/winfx/xaml/themes"
+        mc:Ignorable="d" 
+        Title="Batch Rename" Height="500" Width="550"
+        WindowStyle="None" AllowsTransparency="True" Background="Transparent"
+        ResizeMode="CanResize"
+        WindowStartupLocation="CenterOwner">
+
+    <WindowChrome.WindowChrome>
+        <WindowChrome CaptionHeight="0" ResizeBorderThickness="5" />
+    </WindowChrome.WindowChrome>
+
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary>
+                    <SolidColorBrush x:Key="PrimaryBackgroundBrush" Color="#FF1F1F1F" />
+                    <SolidColorBrush x:Key="SecondaryBackgroundBrush" Color="#FF292929" />
+                    <SolidColorBrush x:Key="BorderBrush" Color="#FF444444" />
+                    <SolidColorBrush x:Key="ForegroundBrush" Color="#EEEEEE" />
+                </ResourceDictionary>
+                <ResourceDictionary Source="pack://application:,,,/MaterialDesignThemes.Wpf;component/Themes/MaterialDesignTheme.ComboBox.xaml" />
+                <ResourceDictionary Source="pack://application:,,,/MaterialDesignThemes.Wpf;component/Themes/MaterialDesignTheme.Dark.xaml" />
+                <ResourceDictionary Source="pack://application:,,,/ProSchedules;component/UI/Themes/ElementStyles.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+
+            <Style x:Key="CancelButtonStyle" BasedOn="{StaticResource NegativeActionButtonStyle}" TargetType="Button">
+                <Setter Property="Background" Value="#FF555555"/>
+                <Setter Property="BorderBrush" Value="#FF555555"/>
+                <Setter Property="Foreground" Value="White"/>
+            </Style>
+        </ResourceDictionary>
+    </Window.Resources>
+
+    <Border Background="#1E1E1E" 
+            BorderBrush="#333333" 
+            BorderThickness="1" 
+            CornerRadius="8">
+        <Grid Margin="0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/> <!-- TitleBar -->
+                <RowDefinition Height="Auto"/> <!-- Options -->
+                <RowDefinition Height="*"/>    <!-- Preview -->
+                <RowDefinition Height="Auto"/> <!-- Footer -->
+            </Grid.RowDefinitions>
+
+            <!-- Title Bar -->
+            <ui:TitleBar Grid.Row="0" Foreground="{DynamicResource ForegroundBrush}" IsMinimizeVisible="False" />
+
+            <!-- Options Grid -->
+            <Grid Grid.Row="1" Margin="20,10,20,10">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Parameter -->
+                <TextBlock Grid.Row="0" Grid.Column="0"
+                           Text="Parameter:"
+                           VerticalAlignment="Center"
+                           Foreground="{DynamicResource ForegroundBrush}"
+                           Margin="0,0,15,10"/>
+                <ComboBox x:Name="RenameParameterCombo"
+                          Grid.Row="0" Grid.Column="1"
+                          Width="220"
+                          HorizontalAlignment="Left"
+                          SelectedIndex="0"
+                          Margin="0,0,0,10"
+                          SelectionChanged="RenameParameter_Changed"
+                          Style="{StaticResource DarkComboBoxStyle}">
+                    <ComboBox.ItemTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding Name}"/>
+                        </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                </ComboBox>
+
+                <!-- Find -->
+                <TextBlock Grid.Row="1" Grid.Column="0"
+                           Text="Find:"
+                           VerticalAlignment="Center"
+                           Foreground="{DynamicResource ForegroundBrush}"
+                           Margin="0,0,15,10"/>
+                <TextBox x:Name="FindTextBox"
+                         Grid.Row="1" Grid.Column="1"
+                         Width="220"
+                         HorizontalAlignment="Left"
+                         Style="{StaticResource CustomTextBoxStyle}"
+                         Margin="0,0,0,10"
+                         TextChanged="RenameText_Changed"/>
+
+                <!-- Replace -->
+                <TextBlock Grid.Row="2" Grid.Column="0"
+                           Text="Replace:"
+                           VerticalAlignment="Center"
+                           Foreground="{DynamicResource ForegroundBrush}"
+                           Margin="0,0,15,10"/>
+                <TextBox x:Name="ReplaceTextBox"
+                         Grid.Row="2" Grid.Column="1"
+                         Width="220"
+                         HorizontalAlignment="Left"
+                         Style="{StaticResource CustomTextBoxStyle}"
+                         Margin="0,0,0,10"
+                         TextChanged="RenameText_Changed"/>
+
+                <!-- Prefix -->
+                <TextBlock Grid.Row="3" Grid.Column="0"
+                           Text="Prefix:"
+                           VerticalAlignment="Center"
+                           Foreground="{DynamicResource ForegroundBrush}"
+                           Margin="0,0,15,10"/>
+                <TextBox x:Name="PrefixTextBox"
+                         Grid.Row="3" Grid.Column="1"
+                         Width="220"
+                         HorizontalAlignment="Left"
+                         Style="{StaticResource CustomTextBoxStyle}"
+                         Margin="0,0,0,10"
+                         TextChanged="RenameText_Changed"/>
+
+                <!-- Suffix -->
+                <TextBlock Grid.Row="4" Grid.Column="0"
+                           Text="Suffix:"
+                           VerticalAlignment="Center"
+                           Foreground="{DynamicResource ForegroundBrush}"
+                           Margin="0,0,15,0"/>
+                <TextBox x:Name="SuffixTextBox"
+                         Grid.Row="4" Grid.Column="1"
+                         Width="220"
+                         HorizontalAlignment="Left"
+                         Style="{StaticResource CustomTextBoxStyle}"
+                         TextChanged="RenameText_Changed"/>
+            </Grid>
+
+            <!-- Preview List -->
+            <Border Grid.Row="2"
+                    Background="{DynamicResource SecondaryBackgroundBrush}"
+                    BorderBrush="{DynamicResource BorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="4"
+                    Margin="20,0,20,15">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0"
+                               Text="Preview"
+                               FontSize="14"
+                               FontWeight="Bold"
+                               Foreground="{DynamicResource ForegroundBrush}"
+                               Margin="10,10,10,5"/>
+
+                    <DataGrid Grid.Row="1"
+                              x:Name="PreviewDataGrid"
+                              AutoGenerateColumns="False"
+                              IsReadOnly="True"
+                              CanUserAddRows="False"
+                              CanUserDeleteRows="False"
+                              CanUserResizeRows="False"
+                              Style="{StaticResource CustomDataGridStyle}"
+                              SelectionMode="Single"
+                              RowBackground="{DynamicResource PrimaryBackgroundBrush}"
+                              AlternatingRowBackground="{DynamicResource SecondaryBackgroundBrush}"
+                              RowHeight="24"
+                              GridLinesVisibility="None"
+                              HeadersVisibility="Column"
+                              RowHeaderWidth="0"
+                              Background="Transparent"
+                              Margin="5">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Original"
+                                                Binding="{Binding Original}"
+                                                Width="*"
+                                                HeaderStyle="{StaticResource MultiRowHeaderStyle}"/>
+                            <DataGridTextColumn Header="New"
+                                                Binding="{Binding New}"
+                                                Width="*"
+                                                HeaderStyle="{StaticResource MultiRowHeaderStyle_NoRightBorder}"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Grid>
+            </Border>
+
+            <!-- Footer -->
+            <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,0,20">
+                <Button Content="Apply" Click="Apply_Click" 
+                        Style="{StaticResource CustomActionButtonStyle}" 
+                        Width="120" Height="35" FontSize="12" Margin="5,0,5,0"/>
+                <Button Content="Cancel" Click="Cancel_Click" 
+                        Style="{StaticResource CancelButtonStyle}" 
+                        Width="120" Height="35" FontSize="12" Margin="5,0,5,0"/>
+            </StackPanel>
+
+            <!-- Confirmation Popup Overlay -->
+            <Grid x:Name="ConfirmPopupOverlay" Grid.RowSpan="4" Visibility="Collapsed" Panel.ZIndex="1050">
+                <!-- Dim Background -->
+                <Border Background="#90000000"/>
+
+                <!-- Popup Content -->
+                <Border HorizontalAlignment="Center" 
+                        VerticalAlignment="Center"
+                        Width="400"
+                        Padding="20"
+                        Background="{DynamicResource PrimaryBackgroundBrush}"
+                        BorderBrush="{DynamicResource BorderBrush}"
+                        BorderThickness="1"
+                        CornerRadius="8">
+                    <Border.Effect>
+                        <DropShadowEffect BlurRadius="15" Direction="-90" RenderingBias="Quality" ShadowDepth="2" Opacity="0.4"/>
+                    </Border.Effect>
+
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <TextBlock x:Name="ConfirmPopupTitle" 
+                                   Grid.Row="0"
+                                   Text="Type Parameter Warning" 
+                                   FontSize="16" 
+                                   FontWeight="Bold" 
+                                   Foreground="{DynamicResource ForegroundBrush}"
+                                   Margin="0,0,0,10"/>
+
+                        <TextBlock x:Name="ConfirmPopupMessage" 
+                                   Grid.Row="1"
+                                   Text="You are modifying a Type parameter. This will affect ALL elements of this type in the project.&#x0a;&#x0a;Do you want to continue?" 
+                                   TextWrapping="Wrap"
+                                   Foreground="{DynamicResource ForegroundBrush}"
+                                   Margin="0,0,0,20"/>
+
+                        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+                            <Button Content="Continue"
+                                    Click="ConfirmContinue_Click"
+                                    Style="{StaticResource CustomActionButtonStyle}"
+                                    Width="90" 
+                                    Height="30"
+                                    FontSize="12"
+                                    Margin="0,0,8,0"/>
+                            <Button Content="Cancel"
+                                    Click="ConfirmCancel_Click"
+                                    Style="{StaticResource NegativeActionButtonStyle}"
+                                    Background="#FF555555"
+                                    BorderBrush="#FF555555"
+                                    Width="90" 
+                                    Height="30"
+                                    FontSize="12"
+                                    Margin="0"/>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+            </Grid>
+        </Grid>
+    </Border>
+</Window>
+

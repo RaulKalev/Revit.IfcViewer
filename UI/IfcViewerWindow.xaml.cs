@@ -91,10 +91,62 @@ namespace IfcViewer.UI
         private GroupModel3D _outlineRoot;
 
         // ── ViewCube compass ring ──────────────────────────────────────────────
-        // WPF 2D overlay positioned below the Helix built-in ViewCube.
-        // Rotates with the camera's horizontal heading so N always points to
-        // model-north (treating -Z as north, matching IFC/Revit convention).
-        private RotateTransform _compassRotate;
+        // WPF 2D overlay wrapped around the Helix built-in ViewCube.
+        // Cube and compass are projected from the same 3D basis so they rotate
+        // together with the full camera orientation (yaw + pitch + roll).
+        private WpfShapes.Path _compassRing;
+        private readonly Dictionary<string, TextBlock> _compassLabels
+            = new Dictionary<string, TextBlock>(StringComparer.Ordinal);
+        private enum OrientationCubeFace { Front, Back, Left, Right, Top, Bottom }
+        private readonly Dictionary<OrientationCubeFace, WpfShapes.Polygon> _orientationCubeFaces
+            = new Dictionary<OrientationCubeFace, WpfShapes.Polygon>();
+        private readonly Dictionary<OrientationCubeFace, TextBlock> _orientationCubeFaceLabels
+            = new Dictionary<OrientationCubeFace, TextBlock>();
+        private readonly Dictionary<OrientationCubeFace, SolidColorBrush> _orientationCubeFaceBrushes
+            = new Dictionary<OrientationCubeFace, SolidColorBrush>();
+        private readonly Dictionary<OrientationCubeFace, SolidColorBrush> _orientationCubeFaceHoverBrushes
+            = new Dictionary<OrientationCubeFace, SolidColorBrush>();
+        private OrientationCubeFace? _hoveredOrientationCubeFace;
+        private static readonly OrientationCubeFace[] OrientationCubeFaceOrder = new[]
+        {
+            OrientationCubeFace.Front,
+            OrientationCubeFace.Back,
+            OrientationCubeFace.Left,
+            OrientationCubeFace.Right,
+            OrientationCubeFace.Top,
+            OrientationCubeFace.Bottom,
+        };
+        private static readonly Media3D.Point3D[] OrientationCubeVertices = new[]
+        {
+            new Media3D.Point3D(-1, -1, -1), // 0
+            new Media3D.Point3D( 1, -1, -1), // 1
+            new Media3D.Point3D( 1,  1, -1), // 2
+            new Media3D.Point3D(-1,  1, -1), // 3
+            new Media3D.Point3D(-1, -1,  1), // 4
+            new Media3D.Point3D( 1, -1,  1), // 5
+            new Media3D.Point3D( 1,  1,  1), // 6
+            new Media3D.Point3D(-1,  1,  1), // 7
+        };
+        private static readonly int[] OrientationFaceFront  = { 0, 1, 2, 3 };
+        private static readonly int[] OrientationFaceBack   = { 4, 5, 6, 7 };
+        private static readonly int[] OrientationFaceLeft   = { 0, 4, 7, 3 };
+        private static readonly int[] OrientationFaceRight  = { 1, 5, 6, 2 };
+        private static readonly int[] OrientationFaceTop    = { 3, 2, 6, 7 };
+        private static readonly int[] OrientationFaceBottom = { 0, 1, 5, 4 };
+        private const double OrientationCubeScale = 14.0;
+        private double _orientationCubeCenterX;
+        private double _orientationCubeCenterY;
+
+        private DependencyPropertyDescriptor _cameraLookDirectionDescriptor;
+        private DependencyPropertyDescriptor _cameraUpDirectionDescriptor;
+        private DependencyPropertyDescriptor _cameraPositionDescriptor;
+        private EventHandler _cameraOrientationChangedHandler;
+        private bool _cameraSyncAttached;
+
+        private Media3D.Point3D  _lastCameraPosition;
+        private Media3D.Vector3D _lastCameraLookDirection;
+        private Media3D.Vector3D _lastCameraUpDirection;
+        private bool _hasCameraSnapshot;
 
         // ── Constructor ───────────────────────────────────────────────────────
         public IfcViewerWindow(UIApplication uiApp)
@@ -119,6 +171,8 @@ namespace IfcViewer.UI
                     Camera                   = _viewerHost.Camera,
                     ShowCoordinateSystem     = false,
                     ShowFrameRate            = true,
+                    InfoBackground           = Brushes.Transparent,
+                    TitleBackground          = Brushes.Transparent,
                     // SSAO — ambient occlusion darkens corners and contact zones, making
                     // object shapes much easier to read in dense architectural models.
                     // Sampling radius is in world units (metres); default is sub-metre
@@ -215,12 +269,10 @@ namespace IfcViewer.UI
                 _viewport.ViewCubeTexture = CreateRevitViewCubeTexture();
                 ViewportContainer.Children.Add(BuildCompassOverlay());
 
-                // Update compass heading whenever the camera's look direction changes.
-                DependencyPropertyDescriptor
-                    .FromProperty(Media3D.PerspectiveCamera.LookDirectionProperty,
-                                  typeof(Media3D.PerspectiveCamera))
-                    .AddValueChanged(_viewerHost.Camera, (s2, e2) => UpdateCompassHeading());
-                UpdateCompassHeading(); // seed initial angle
+                // Keep orientation overlays synced with camera motion (including
+                // animated transitions) and force redraw so the ViewCube updates.
+                AttachCameraOrientationSync();
+                UpdateCameraOrientationWidgets(force: true);
 
                 // 6. Bind the model list
                 ModelListBox.ItemsSource = _loadedModels;
@@ -317,6 +369,7 @@ namespace IfcViewer.UI
                 _revitElementMap.Clear();
 
                 this.PreviewMouseWheel -= OnPreviewMouseWheel;
+                DetachCameraOrientationSync();
                 _fpController?.Dispose();
                 _sectionMgr?.DetachVisual();
                 _syncRevitEvent?.Dispose();
@@ -981,31 +1034,32 @@ namespace IfcViewer.UI
         // ── ViewCube helpers ──────────────────────────────────────────────────
 
         /// <summary>
-        /// Creates a TextureModel (600×100 px, Revit-style) with six face labels
+        /// Creates a TextureModel (6 x 128 px strip, Revit-style) with six face labels
         /// in Helix's expected order: Front | Back | Left | Right | Top | Bottom.
         /// The bitmap is PNG-encoded into a MemoryStream so TextureModel can consume it.
         /// </summary>
         private static TextureModel CreateRevitViewCubeTexture()
         {
-            const int S = 100; // pixels per face
+            const int S = 128; // pixels per face
             var labels = new[] { "FRONT", "BACK", "LEFT", "RIGHT", "TOP", "BOTTOM" };
 
-            // Stone-gray faces with subtly different brightness per face (Revit style)
+            // Stone-gray faces with subtle per-face brightness shifts (Revit-like).
             var faceColors = new[]
             {
-                WpfColor.FromRgb(0xBE, 0xC3, 0xC8), // Front  — mid
-                WpfColor.FromRgb(0xAE, 0xB3, 0xB8), // Back   — darker
-                WpfColor.FromRgb(0xB8, 0xBD, 0xC2), // Left   — mid-dark
-                WpfColor.FromRgb(0xC8, 0xCC, 0xD0), // Right  — lighter
-                WpfColor.FromRgb(0xD4, 0xD8, 0xDC), // Top    — lightest
-                WpfColor.FromRgb(0xA8, 0xAC, 0xB0), // Bottom — darkest
+                WpfColor.FromRgb(0xC2, 0xC7, 0xCB), // Front  — neutral
+                WpfColor.FromRgb(0xA7, 0xAC, 0xB0), // Back   — darker
+                WpfColor.FromRgb(0xB7, 0xBC, 0xC1), // Left   — mid-dark
+                WpfColor.FromRgb(0xD0, 0xD4, 0xD8), // Right  — lighter
+                WpfColor.FromRgb(0xDB, 0xDE, 0xE2), // Top    — lightest
+                WpfColor.FromRgb(0x9F, 0xA4, 0xA8), // Bottom — darkest
             };
 
-            var borderPen = new Pen(new SolidColorBrush(WpfColor.FromRgb(0x80, 0x85, 0x88)), 0.5);
-            var textBrush = new SolidColorBrush(WpfColor.FromRgb(0x26, 0x26, 0x26));
+            var outerBorderPen = new Pen(new SolidColorBrush(WpfColor.FromRgb(0x7A, 0x7E, 0x82)), 1.0);
+            var innerBorderPen = new Pen(new SolidColorBrush(WpfColor.FromArgb(155, 255, 255, 255)), 1.0);
+            var textBrush = new SolidColorBrush(WpfColor.FromRgb(0x2A, 0x2A, 0x2A));
             var typeface  = new Typeface(
                 new FontFamily("Segoe UI"),
-                FontStyles.Normal, FontWeights.Bold, FontStretches.Normal);
+                FontStyles.Normal, FontWeights.SemiBold, FontStretches.Normal);
 
             var dv = new DrawingVisual();
             using (var dc = dv.RenderOpen())
@@ -1013,9 +1067,17 @@ namespace IfcViewer.UI
                 for (int i = 0; i < labels.Length; i++)
                 {
                     var rect = new Rect(i * S, 0, S, S);
-                    dc.DrawRectangle(new SolidColorBrush(faceColors[i]), borderPen, rect);
+                    var baseColor = faceColors[i];
+                    var faceBrush = new LinearGradientBrush(
+                        ShiftColor(baseColor, +14),
+                        ShiftColor(baseColor, -16),
+                        new WpfPoint(0, 0),
+                        new WpfPoint(1, 1));
 
-                    double fontSize = labels[i].Length > 4 ? 11.0 : 14.0;
+                    dc.DrawRectangle(faceBrush, outerBorderPen, rect);
+                    dc.DrawRectangle(null, innerBorderPen, new Rect(rect.X + 1.5, rect.Y + 1.5, S - 3, S - 3));
+
+                    double fontSize = labels[i].Length > 4 ? 16.0 : 20.0;
                     var ft = new FormattedText(
                         labels[i], CultureInfo.InvariantCulture,
                         FlowDirection.LeftToRight, typeface, fontSize, textBrush, 1.0);
@@ -1039,106 +1101,788 @@ namespace IfcViewer.UI
         }
 
         /// <summary>
-        /// Builds the WPF compass ring overlay that appears below the ViewCube.
-        /// The entire canvas (ring + N/S/E/W labels + arrows) rotates as the
-        /// camera's horizontal heading changes, keeping N pointed at model-north.
+        /// Builds the WPF compass ring overlay that wraps the ViewCube.
+        /// Compass ring and centre cube are both projected from full camera
+        /// orientation, so the ring stays attached under the cube in 3D.
         /// </summary>
         private FrameworkElement BuildCompassOverlay()
         {
-            const double D  = 84;           // overall canvas size (px)
+            const double D  = 96;           // overall canvas size (px)
             const double cx = D / 2, cy = D / 2;
-            const double R  = D / 2 - 3;   // ring radius
+            var rootCanvas = new Canvas { Width = D, Height = D, Opacity = 0.95 };
 
-            _compassRotate = new RotateTransform(0, cx, cy);
+            InitializeCompass3D(rootCanvas);
+            InitializeOrientationCube(rootCanvas, cx, cy);
 
-            var canvas = new Canvas { Width = D, Height = D, IsHitTestVisible = false };
-            canvas.RenderTransform = _compassRotate;
-
-            // ── Outer ring ─────────────────────────────────────────────────────
-            var ring = new WpfShapes.Ellipse
-            {
-                Width           = R * 2,
-                Height          = R * 2,
-                Stroke          = new SolidColorBrush(WpfColor.FromArgb(200, 155, 155, 155)),
-                StrokeThickness = 1.2,
-            };
-            Canvas.SetLeft(ring, cx - R);
-            Canvas.SetTop(ring,  cy - R);
-            canvas.Children.Add(ring);
-
-            // ── North arrow (teal triangle) ─────────────────────────────────────
-            var north = new WpfShapes.Polygon
-            {
-                Fill   = new SolidColorBrush(WpfColor.FromRgb(0x70, 0xBA, 0xBC)),
-                Points = new PointCollection
-                {
-                    new WpfPoint(cx,       cy - R + 2),
-                    new WpfPoint(cx - 5.5, cy - R + 14),
-                    new WpfPoint(cx + 5.5, cy - R + 14),
-                },
-            };
-            canvas.Children.Add(north);
-
-            // ── South marker (smaller gray triangle) ───────────────────────────
-            var south = new WpfShapes.Polygon
-            {
-                Fill   = new SolidColorBrush(WpfColor.FromArgb(200, 115, 115, 115)),
-                Points = new PointCollection
-                {
-                    new WpfPoint(cx,     cy + R - 2),
-                    new WpfPoint(cx - 4, cy + R - 12),
-                    new WpfPoint(cx + 4, cy + R - 12),
-                },
-            };
-            canvas.Children.Add(south);
-
-            // ── Cardinal labels ─────────────────────────────────────────────────
-            AddCompassLabel(canvas, "N", cx - 4.5,    cy - R + 2,  WpfColor.FromRgb(0x70, 0xBA, 0xBC), bold: true);
-            AddCompassLabel(canvas, "S", cx - 4,      cy + R - 14, WpfColor.FromArgb(200, 160, 160, 160));
-            AddCompassLabel(canvas, "E", cx + R - 12, cy - 5.5,    WpfColor.FromArgb(200, 160, 160, 160));
-            AddCompassLabel(canvas, "W", cx - R + 2,  cy - 5.5,    WpfColor.FromArgb(200, 160, 160, 160));
-
-            // ── Container: anchors top-right, positioned below the 80px ViewCube ─
+            // ── Container: anchors top-right and wraps around the ViewCube ───
             return new Border
             {
                 Width               = D,
                 Height              = D,
                 HorizontalAlignment = HorizontalAlignment.Right,
                 VerticalAlignment   = VerticalAlignment.Top,
-                Margin              = new Thickness(0, 88, 30, 0),
-                IsHitTestVisible    = false,
-                Child               = canvas,
+                Margin              = new Thickness(0, 2, 24, 0),
+                Child               = rootCanvas,
             };
         }
 
-        private static void AddCompassLabel(Canvas canvas, string text,
-            double left, double top, WpfColor color, bool bold = false)
+        private void InitializeCompass3D(Canvas canvas)
         {
-            var tb = new TextBlock
+            _compassRing = new WpfShapes.Path
             {
-                Text             = text,
-                FontSize         = 9,
-                FontWeight       = bold ? FontWeights.Bold : FontWeights.Normal,
-                Foreground       = new SolidColorBrush(color),
+                Fill            = new SolidColorBrush(WpfColor.FromArgb(255, 236, 236, 236)),
+                Stroke          = new SolidColorBrush(WpfColor.FromArgb(255, 95, 95, 95)),
+                StrokeThickness = 1.0,
+                StrokeLineJoin  = PenLineJoin.Round,
                 IsHitTestVisible = false,
             };
-            Canvas.SetLeft(tb, left);
-            Canvas.SetTop(tb, top);
-            canvas.Children.Add(tb);
+            canvas.Children.Add(_compassRing);
+
+            _compassLabels.Clear();
+            var northLabel = new TextBlock
+            {
+                Text             = "N",
+                FontSize         = 31.0,
+                FontWeight       = FontWeights.ExtraBold,
+                Foreground       = new SolidColorBrush(WpfColor.FromArgb(240, 60, 60, 60)),
+                IsHitTestVisible = false,
+            };
+            var southLabel = new TextBlock
+            {
+                Text             = "S",
+                FontSize         = 31.0,
+                FontWeight       = FontWeights.ExtraBold,
+                Foreground       = new SolidColorBrush(WpfColor.FromArgb(220, 80, 80, 80)),
+                IsHitTestVisible = false,
+            };
+            var eastLabel = new TextBlock
+            {
+                Text             = "E",
+                FontSize         = 31.0,
+                FontWeight       = FontWeights.ExtraBold,
+                Foreground       = new SolidColorBrush(WpfColor.FromArgb(220, 80, 80, 80)),
+                IsHitTestVisible = false,
+            };
+            var westLabel = new TextBlock
+            {
+                Text             = "W",
+                FontSize         = 31.0,
+                FontWeight       = FontWeights.ExtraBold,
+                Foreground       = new SolidColorBrush(WpfColor.FromArgb(220, 80, 80, 80)),
+                IsHitTestVisible = false,
+            };
+
+            _compassLabels["N"] = northLabel;
+            _compassLabels["S"] = southLabel;
+            _compassLabels["E"] = eastLabel;
+            _compassLabels["W"] = westLabel;
+
+            canvas.Children.Add(northLabel);
+            canvas.Children.Add(southLabel);
+            canvas.Children.Add(eastLabel);
+            canvas.Children.Add(westLabel);
         }
 
-        /// <summary>
-        /// Recomputes the compass heading from the camera's horizontal look direction.
-        /// Treating -Z as model-north: heading = atan2(look.X, -look.Z).
-        /// The compass content rotates by the negative heading so N stays pointed
-        /// toward model-north regardless of the camera's horizontal orientation.
-        /// </summary>
-        private void UpdateCompassHeading()
+        private void InitializeOrientationCube(Canvas canvas, double cx, double cy)
         {
-            if (_compassRotate == null || _viewerHost == null) return;
+            _orientationCubeCenterX = cx;
+            _orientationCubeCenterY = cy;
+            _orientationCubeFaces.Clear();
+            _orientationCubeFaceLabels.Clear();
+            _orientationCubeFaceBrushes.Clear();
+            _orientationCubeFaceHoverBrushes.Clear();
+            _hoveredOrientationCubeFace = null;
+
+            foreach (var face in OrientationCubeFaceOrder)
+            {
+                var baseColor = GetOrientationCubeFaceColor(face);
+                var baseBrush = new SolidColorBrush(baseColor);
+                var hoverBrush = new SolidColorBrush(ShiftColor(baseColor, +28));
+                _orientationCubeFaceBrushes[face] = baseBrush;
+                _orientationCubeFaceHoverBrushes[face] = hoverBrush;
+
+                var poly = new WpfShapes.Polygon
+                {
+                    Stroke          = new SolidColorBrush(WpfColor.FromArgb(255, 120, 120, 120)),
+                    StrokeThickness = 0.8,
+                    Fill            = baseBrush,
+                    Visibility      = System.Windows.Visibility.Collapsed,
+                    IsHitTestVisible = true,
+                    Cursor          = Cursors.Hand,
+                    Tag             = face,
+                };
+                poly.MouseEnter += OrientationCubeFace_MouseEnter;
+                poly.MouseLeave += OrientationCubeFace_MouseLeave;
+                poly.MouseLeftButtonDown += OrientationCubeFace_MouseLeftButtonDown;
+
+                _orientationCubeFaces.Add(face, poly);
+                canvas.Children.Add(poly);
+
+                var label = new TextBlock
+                {
+                    Text             = GetOrientationCubeFaceText(face),
+                    FontSize         = 8.0,
+                    FontWeight       = FontWeights.SemiBold,
+                    FontFamily       = new FontFamily("Segoe UI"),
+                    Foreground       = new SolidColorBrush(WpfColor.FromArgb(230, 65, 65, 65)),
+                    Visibility       = System.Windows.Visibility.Collapsed,
+                    IsHitTestVisible = false,
+                };
+                _orientationCubeFaceLabels.Add(face, label);
+                canvas.Children.Add(label);
+            }
+        }
+
+        private static WpfColor GetOrientationCubeFaceColor(OrientationCubeFace face)
+        {
+            switch (face)
+            {
+                case OrientationCubeFace.Top:    return WpfColor.FromArgb(255, 0xE7, 0xE9, 0xEC);
+                case OrientationCubeFace.Bottom: return WpfColor.FromArgb(255, 0xA2, 0xA6, 0xAA);
+                case OrientationCubeFace.Right:  return WpfColor.FromArgb(255, 0xC9, 0xCD, 0xD1);
+                case OrientationCubeFace.Left:   return WpfColor.FromArgb(255, 0xB8, 0xBC, 0xC0);
+                case OrientationCubeFace.Back:   return WpfColor.FromArgb(255, 0xAC, 0xB0, 0xB4);
+                default:                         return WpfColor.FromArgb(255, 0xCD, 0xD1, 0xD5); // Front
+            }
+        }
+
+        private static string GetOrientationCubeFaceText(OrientationCubeFace face)
+        {
+            switch (face)
+            {
+                case OrientationCubeFace.Front:  return "FRONT";
+                case OrientationCubeFace.Back:   return "BACK";
+                case OrientationCubeFace.Left:   return "LEFT";
+                case OrientationCubeFace.Right:  return "RIGHT";
+                case OrientationCubeFace.Top:    return "TOP";
+                case OrientationCubeFace.Bottom: return "BOTTOM";
+                default:                         return "FRONT";
+            }
+        }
+
+        private static int[] GetOrientationCubeFaceIndices(OrientationCubeFace face)
+        {
+            switch (face)
+            {
+                case OrientationCubeFace.Front:  return OrientationFaceFront;
+                case OrientationCubeFace.Back:   return OrientationFaceBack;
+                case OrientationCubeFace.Left:   return OrientationFaceLeft;
+                case OrientationCubeFace.Right:  return OrientationFaceRight;
+                case OrientationCubeFace.Top:    return OrientationFaceTop;
+                case OrientationCubeFace.Bottom: return OrientationFaceBottom;
+                default:                         return OrientationFaceFront;
+            }
+        }
+
+        private void UpdateOrientationCubeVisual()
+        {
+            if (_viewerHost?.Camera == null || _orientationCubeFaces.Count == 0) return;
+
+            var forward = _viewerHost.Camera.LookDirection;
+            if (forward.LengthSquared < 1e-9) return;
+            forward.Normalize();
+
+            var up = _viewerHost.Camera.UpDirection;
+            if (up.LengthSquared < 1e-9)
+                up = new Media3D.Vector3D(0, 1, 0);
+            else
+                up.Normalize();
+
+            var right = Media3D.Vector3D.CrossProduct(forward, up);
+            if (right.LengthSquared < 1e-9)
+            {
+                right = Media3D.Vector3D.CrossProduct(forward, new Media3D.Vector3D(0, 1, 0));
+                if (right.LengthSquared < 1e-9)
+                    right = Media3D.Vector3D.CrossProduct(forward, new Media3D.Vector3D(1, 0, 0));
+            }
+            right.Normalize();
+            up = Media3D.Vector3D.CrossProduct(right, forward);
+            up.Normalize();
+
+            UpdateCompass3DVisual(right, up, forward);
+
+            var visibleFaces = new List<KeyValuePair<OrientationCubeFace, double>>();
+
+            foreach (var face in OrientationCubeFaceOrder)
+            {
+                var poly = _orientationCubeFaces[face];
+                var label = _orientationCubeFaceLabels[face];
+                var faceNormal = GetOrientationCubeFaceNormal(face);
+                if (Media3D.Vector3D.DotProduct(faceNormal, forward) >= -0.001)
+                {
+                    poly.Visibility = System.Windows.Visibility.Collapsed;
+                    label.Visibility = System.Windows.Visibility.Collapsed;
+                    continue;
+                }
+
+                var indices = GetOrientationCubeFaceIndices(face);
+                var points = new PointCollection(indices.Length);
+                double depth = 0.0;
+
+                for (int i = 0; i < indices.Length; i++)
+                {
+                    double pointDepth;
+                    var projected = ProjectWidgetPoint(OrientationCubeVertices[indices[i]], right, up, forward, out pointDepth);
+                    points.Add(projected);
+                    depth += pointDepth;
+                }
+
+                poly.Points = points;
+                poly.Visibility = System.Windows.Visibility.Visible;
+                visibleFaces.Add(new KeyValuePair<OrientationCubeFace, double>(face, depth / indices.Length));
+            }
+
+            // Painter order: far faces first.
+            visibleFaces.Sort((a, b) => a.Value.CompareTo(b.Value));
+            for (int i = 0; i < visibleFaces.Count; i++)
+            {
+                var face = visibleFaces[i].Key;
+                var poly = _orientationCubeFaces[face];
+                var label = _orientationCubeFaceLabels[face];
+                ApplyOrientationCubeFaceFill(face, poly);
+                Panel.SetZIndex(poly, 100 + i);
+                PositionOrientationCubeFaceLabel(face, poly.Points, label, 220 + i);
+            }
+
+            foreach (var face in OrientationCubeFaceOrder)
+            {
+                bool isVisible = false;
+                for (int i = 0; i < visibleFaces.Count; i++)
+                    if (visibleFaces[i].Key == face) { isVisible = true; break; }
+
+                if (!isVisible)
+                    _orientationCubeFaceLabels[face].Visibility = System.Windows.Visibility.Collapsed;
+            }
+
+            if (_hoveredOrientationCubeFace.HasValue)
+            {
+                bool hoveredStillVisible = false;
+                for (int i = 0; i < visibleFaces.Count; i++)
+                {
+                    if (visibleFaces[i].Key == _hoveredOrientationCubeFace.Value)
+                    {
+                        hoveredStillVisible = true;
+                        break;
+                    }
+                }
+                if (!hoveredStillVisible)
+                    _hoveredOrientationCubeFace = null;
+            }
+        }
+
+        private void OrientationCubeFace_MouseEnter(object sender, MouseEventArgs e)
+        {
+            var poly = sender as WpfShapes.Polygon;
+            if (poly == null || !(poly.Tag is OrientationCubeFace)) return;
+
+            var face = (OrientationCubeFace)poly.Tag;
+            _hoveredOrientationCubeFace = face;
+            ApplyOrientationCubeFaceFill(face, poly);
+        }
+
+        private void OrientationCubeFace_MouseLeave(object sender, MouseEventArgs e)
+        {
+            var poly = sender as WpfShapes.Polygon;
+            if (poly == null || !(poly.Tag is OrientationCubeFace)) return;
+
+            var face = (OrientationCubeFace)poly.Tag;
+            if (_hoveredOrientationCubeFace.HasValue && _hoveredOrientationCubeFace.Value == face)
+                _hoveredOrientationCubeFace = null;
+            ApplyOrientationCubeFaceFill(face, poly);
+        }
+
+        private void OrientationCubeFace_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            var poly = sender as WpfShapes.Polygon;
+            if (poly == null || !(poly.Tag is OrientationCubeFace)) return;
+
+            var face = (OrientationCubeFace)poly.Tag;
+            SnapCameraToOrientationFace(face);
+            e.Handled = true;
+        }
+
+        private void ApplyOrientationCubeFaceFill(OrientationCubeFace face, WpfShapes.Polygon poly)
+        {
+            if (poly == null) return;
+
+            bool isHovered = _hoveredOrientationCubeFace.HasValue && _hoveredOrientationCubeFace.Value == face;
+            SolidColorBrush brush;
+            if (isHovered && _orientationCubeFaceHoverBrushes.TryGetValue(face, out brush))
+            {
+                poly.Fill = brush;
+                return;
+            }
+
+            if (_orientationCubeFaceBrushes.TryGetValue(face, out brush))
+                poly.Fill = brush;
+        }
+
+        private void SnapCameraToOrientationFace(OrientationCubeFace face)
+        {
+            if (_viewerHost?.Camera == null) return;
+
+            var camera = _viewerHost.Camera;
+            double distance = camera.LookDirection.Length;
+            if (distance < 0.001) distance = 10.0;
+
+            var target = camera.Position + camera.LookDirection;
+            var viewDirection = GetOrientationFaceViewDirection(face);
+            var upDirection = GetOrientationFaceUpDirection(face);
+
+            var newLookDirection = new Media3D.Vector3D(
+                viewDirection.X * distance,
+                viewDirection.Y * distance,
+                viewDirection.Z * distance);
+
+            camera.LookDirection = newLookDirection;
+            camera.UpDirection = upDirection;
+            camera.Position = target - newLookDirection;
+
+            UpdateCameraOrientationWidgets(force: true);
+            _viewport.InvalidateRender();
+        }
+
+        private static Media3D.Vector3D GetOrientationFaceViewDirection(OrientationCubeFace face)
+        {
+            var normal = GetOrientationCubeFaceNormal(face);
+            var view = new Media3D.Vector3D(-normal.X, -normal.Y, -normal.Z);
+            if (view.LengthSquared < 1e-9)
+                return new Media3D.Vector3D(0, 0, 1);
+            view.Normalize();
+            return view;
+        }
+
+        private static Media3D.Vector3D GetOrientationFaceUpDirection(OrientationCubeFace face)
+        {
+            switch (face)
+            {
+                case OrientationCubeFace.Top:
+                    return new Media3D.Vector3D(0, 0, -1);
+                case OrientationCubeFace.Bottom:
+                    return new Media3D.Vector3D(0, 0, 1);
+                default:
+                    return new Media3D.Vector3D(0, 1, 0);
+            }
+        }
+
+        private static Media3D.Vector3D GetOrientationCubeFaceNormal(OrientationCubeFace face)
+        {
+            switch (face)
+            {
+                case OrientationCubeFace.Front:  return new Media3D.Vector3D(0, 0, -1);
+                case OrientationCubeFace.Back:   return new Media3D.Vector3D(0, 0,  1);
+                case OrientationCubeFace.Left:   return new Media3D.Vector3D(-1, 0, 0);
+                case OrientationCubeFace.Right:  return new Media3D.Vector3D( 1, 0, 0);
+                case OrientationCubeFace.Top:    return new Media3D.Vector3D(0,  1, 0);
+                case OrientationCubeFace.Bottom: return new Media3D.Vector3D(0, -1, 0);
+                default:                         return new Media3D.Vector3D(0, 0, -1);
+            }
+        }
+
+        private void PositionOrientationCubeFaceLabel(
+            OrientationCubeFace face,
+            PointCollection points,
+            TextBlock label,
+            int zIndex)
+        {
+            double area = PolygonArea(points);
+            if (area < 85.0)
+            {
+                label.Visibility = System.Windows.Visibility.Collapsed;
+                return;
+            }
+
+            label.Text = GetOrientationCubeFaceText(face);
+            label.FontSize = face == OrientationCubeFace.Top ? 8.0 : 7.6;
+            label.Visibility = System.Windows.Visibility.Visible;
+            label.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            var size = label.DesiredSize;
+            if (points.Count < 4 || size.Width < 0.1 || size.Height < 0.1)
+            {
+                var fallbackCenter = PolygonCentroid(points);
+                Canvas.SetLeft(label, fallbackCenter.X - size.Width * 0.5);
+                Canvas.SetTop(label,  fallbackCenter.Y - size.Height * 0.52);
+                label.RenderTransform = Transform.Identity;
+                Panel.SetZIndex(label, zIndex);
+                return;
+            }
+
+            var p0 = points[0];
+            var p1 = points[1];
+            var p3 = points[3];
+            var center = PolygonCentroid(points);
+
+            var xBasis = new Media3D.Vector3D(p1.X - p0.X, p1.Y - p0.Y, 0.0);
+            var yBasis = new Media3D.Vector3D(p3.X - p0.X, p3.Y - p0.Y, 0.0);
+            double xLen = Math.Sqrt(xBasis.X * xBasis.X + xBasis.Y * xBasis.Y);
+            double yLen = Math.Sqrt(yBasis.X * yBasis.X + yBasis.Y * yBasis.Y);
+            if (xLen < 0.001 || yLen < 0.001)
+            {
+                Canvas.SetLeft(label, center.X - size.Width * 0.5);
+                Canvas.SetTop(label,  center.Y - size.Height * 0.52);
+                label.RenderTransform = Transform.Identity;
+                Panel.SetZIndex(label, zIndex);
+                return;
+            }
+
+            // Keep cube face text screen-size stable instead of scaling by face foreshortening.
+            double targetHeightPx = face == OrientationCubeFace.Top
+                ? 10.0
+                : 9.2;
+            double scalePerPixel = targetHeightPx / size.Height;
+
+            var xVec = new Media3D.Vector3D(
+                xBasis.X / xLen * scalePerPixel,
+                xBasis.Y / xLen * scalePerPixel,
+                0.0);
+            var yVec = new Media3D.Vector3D(
+                yBasis.X / yLen * scalePerPixel,
+                yBasis.Y / yLen * scalePerPixel,
+                0.0);
+
+            // Keep text from being mirrored when the projected face basis flips.
+            double det = xVec.X * yVec.Y - xVec.Y * yVec.X;
+            if (det < 0.0)
+                xVec = new Media3D.Vector3D(-xVec.X, -xVec.Y, 0.0);
+
+            // Side labels (FRONT/BACK/LEFT/RIGHT) are rotated 180 deg vs desired.
+            // Flip both basis vectors to keep them upright on the face.
+            if (face == OrientationCubeFace.Front
+                || face == OrientationCubeFace.Back
+                || face == OrientationCubeFace.Left
+                || face == OrientationCubeFace.Right)
+            {
+                xVec = new Media3D.Vector3D(-xVec.X, -xVec.Y, 0.0);
+                yVec = new Media3D.Vector3D(-yVec.X, -yVec.Y, 0.0);
+            }
+
+            var offset = new WpfPoint(
+                center.X - (xVec.X * size.Width * 0.5 + yVec.X * size.Height * 0.52),
+                center.Y - (xVec.Y * size.Width * 0.5 + yVec.Y * size.Height * 0.52));
+
+            label.RenderTransform = new MatrixTransform(new System.Windows.Media.Matrix(
+                xVec.X, xVec.Y,
+                yVec.X, yVec.Y,
+                offset.X, offset.Y));
+            Canvas.SetLeft(label, 0.0);
+            Canvas.SetTop(label,  0.0);
+            Panel.SetZIndex(label, zIndex);
+        }
+
+        private static double PolygonArea(PointCollection points)
+        {
+            if (points == null || points.Count < 3) return 0.0;
+            double a = 0.0;
+            for (int i = 0; i < points.Count; i++)
+            {
+                var p1 = points[i];
+                var p2 = points[(i + 1) % points.Count];
+                a += p1.X * p2.Y - p2.X * p1.Y;
+            }
+            return Math.Abs(a) * 0.5;
+        }
+
+        private static WpfPoint PolygonCentroid(PointCollection points)
+        {
+            if (points == null || points.Count == 0) return new WpfPoint(0, 0);
+            double x = 0.0, y = 0.0;
+            for (int i = 0; i < points.Count; i++)
+            {
+                x += points[i].X;
+                y += points[i].Y;
+            }
+            return new WpfPoint(x / points.Count, y / points.Count);
+        }
+
+        private static Geometry BuildCompassRingGeometry(PointCollection outerPoints, PointCollection innerPoints)
+        {
+            if (outerPoints == null || innerPoints == null || outerPoints.Count < 3 || innerPoints.Count < 3)
+                return Geometry.Empty;
+
+            var outerFigure = new PathFigure
+            {
+                StartPoint = outerPoints[0],
+                IsClosed = true,
+                IsFilled = true,
+            };
+            for (int i = 1; i < outerPoints.Count; i++)
+                outerFigure.Segments.Add(new LineSegment(outerPoints[i], true));
+
+            var innerFigure = new PathFigure
+            {
+                StartPoint = innerPoints[0],
+                IsClosed = true,
+                IsFilled = true,
+            };
+            for (int i = 1; i < innerPoints.Count; i++)
+                innerFigure.Segments.Add(new LineSegment(innerPoints[i], true));
+
+            return new PathGeometry(
+                new[] { outerFigure, innerFigure },
+                FillRule.EvenOdd,
+                null);
+        }
+
+        private void UpdateCompass3DVisual(
+            Media3D.Vector3D right,
+            Media3D.Vector3D up,
+            Media3D.Vector3D forward)
+        {
+            if (_compassRing == null) return;
+
+            const int segments = 56;
+            const double ringY = -1.0;
+            const double ringOuterRadius = 2.95;
+            const double ringInnerRadius = 2.15;
+            const double labelRadius = (ringOuterRadius + ringInnerRadius) * 0.5;
+
+            var outerPoints = new PointCollection(segments + 1);
+            var innerPoints = new PointCollection(segments + 1);
+            for (int i = 0; i <= segments; i++)
+            {
+                double a = (Math.PI * 2.0 * i) / segments;
+                double d;
+                outerPoints.Add(ProjectWidgetPoint(
+                    new Media3D.Point3D(Math.Cos(a) * ringOuterRadius, ringY, Math.Sin(a) * ringOuterRadius),
+                    right, up, forward, out d));
+                innerPoints.Add(ProjectWidgetPoint(
+                    new Media3D.Point3D(Math.Cos(a) * ringInnerRadius, ringY, Math.Sin(a) * ringInnerRadius),
+                    right, up, forward, out d));
+            }
+            _compassRing.Data = BuildCompassRingGeometry(outerPoints, innerPoints);
+
+            // Cardinal mapping with model north = -Z.
+            var cardinalAngles = new[] { -Math.PI * 0.5, Math.PI * 0.5, 0.0, Math.PI };
+            var cardinalNames = new[] { "N", "S", "E", "W" };
+
+            for (int i = 0; i < 4; i++)
+            {
+                double a = cardinalAngles[i];
+                double depth;
+                TextBlock label;
+                if (_compassLabels.TryGetValue(cardinalNames[i], out label))
+                {
+                    var tangentLocal = new Media3D.Vector3D(-Math.Sin(a), 0.0, Math.Cos(a));
+                    var inwardLocal  = new Media3D.Vector3D(-Math.Cos(a), 0.0, -Math.Sin(a));
+                    const double basisStep = 0.35;
+
+                    var labelPoint = ProjectWidgetPoint(
+                        new Media3D.Point3D(Math.Cos(a) * labelRadius, ringY, Math.Sin(a) * labelRadius),
+                        right, up, forward, out depth);
+
+                    label.Visibility = System.Windows.Visibility.Visible;
+
+                    var tangentPoint = ProjectWidgetPoint(
+                        new Media3D.Point3D(
+                            Math.Cos(a) * labelRadius + tangentLocal.X * basisStep,
+                            ringY,
+                            Math.Sin(a) * labelRadius + tangentLocal.Z * basisStep),
+                        right, up, forward, out depth);
+
+                    var inwardPoint = ProjectWidgetPoint(
+                        new Media3D.Point3D(
+                            Math.Cos(a) * labelRadius + inwardLocal.X * basisStep,
+                            ringY,
+                            Math.Sin(a) * labelRadius + inwardLocal.Z * basisStep),
+                        right, up, forward, out depth);
+
+                    var tangent2D = new Media3D.Vector3D(
+                        tangentPoint.X - labelPoint.X,
+                        tangentPoint.Y - labelPoint.Y,
+                        0.0);
+                    var inward2D = new Media3D.Vector3D(
+                        inwardPoint.X - labelPoint.X,
+                        inwardPoint.Y - labelPoint.Y,
+                        0.0);
+
+                    bool rotateQuarterTurn = cardinalNames[i] == "E" || cardinalNames[i] == "W";
+                    double localRotationDegrees = rotateQuarterTurn ? 90.0 : 0.0;
+                    if (cardinalNames[i] == "E")
+                        localRotationDegrees += 180.0;
+                    PositionCompassLabelOnPlane(
+                        label,
+                        labelPoint,
+                        tangent2D,
+                        inward2D,
+                        zIndex: 80,
+                        localRotationDegrees: localRotationDegrees);
+                }
+            }
+        }
+
+        private static void PositionCompassLabelOnPlane(
+            TextBlock label,
+            WpfPoint anchor,
+            Media3D.Vector3D tangent2D,
+            Media3D.Vector3D inward2D,
+            int zIndex,
+            double localRotationDegrees = 0.0)
+        {
+            label.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            var size = label.DesiredSize;
+            if (size.Width < 0.1 || size.Height < 0.1) return;
+
+            const double targetHeightWorld = 2.00;
+            const double basisStep = 0.35; // must match caller
+            double scalePerPixel = targetHeightWorld / size.Height;
+
+            var xVec = new Media3D.Vector3D(
+                tangent2D.X / basisStep * scalePerPixel,
+                tangent2D.Y / basisStep * scalePerPixel,
+                0.0);
+            var yVec = new Media3D.Vector3D(
+                inward2D.X / basisStep * scalePerPixel,
+                inward2D.Y / basisStep * scalePerPixel,
+                0.0);
+
+            if (Math.Abs(localRotationDegrees) > 0.0001)
+            {
+                double radians = localRotationDegrees * (Math.PI / 180.0);
+                double cos = Math.Cos(radians);
+                double sin = Math.Sin(radians);
+
+                var rotatedX = new Media3D.Vector3D(
+                    xVec.X * cos + yVec.X * sin,
+                    xVec.Y * cos + yVec.Y * sin,
+                    0.0);
+                var rotatedY = new Media3D.Vector3D(
+                    -xVec.X * sin + yVec.X * cos,
+                    -xVec.Y * sin + yVec.Y * cos,
+                    0.0);
+
+                xVec = rotatedX;
+                yVec = rotatedY;
+            }
+
+            var offset = new WpfPoint(
+                anchor.X - (xVec.X * size.Width * 0.5 + yVec.X * size.Height * 0.55),
+                anchor.Y - (xVec.Y * size.Width * 0.5 + yVec.Y * size.Height * 0.55));
+
+            label.RenderTransform = new MatrixTransform(new System.Windows.Media.Matrix(
+                xVec.X, xVec.Y,
+                yVec.X, yVec.Y,
+                offset.X, offset.Y));
+            Canvas.SetLeft(label, 0.0);
+            Canvas.SetTop(label,  0.0);
+            Panel.SetZIndex(label, zIndex);
+        }
+
+        private WpfPoint ProjectWidgetPoint(
+            Media3D.Point3D local,
+            Media3D.Vector3D right,
+            Media3D.Vector3D up,
+            Media3D.Vector3D forward,
+            out double depth)
+        {
+            double camX = local.X * right.X + local.Y * right.Y + local.Z * right.Z;
+            double camY = local.X * up.X    + local.Y * up.Y    + local.Z * up.Z;
+
+            // Orthographic projection for Revit-like orientation widget behavior.
+            depth = -(local.X * forward.X + local.Y * forward.Y + local.Z * forward.Z);
+
+            return new WpfPoint(
+                _orientationCubeCenterX + camX * OrientationCubeScale,
+                _orientationCubeCenterY - camY * OrientationCubeScale);
+        }
+
+        private static WpfColor ShiftColor(WpfColor color, int delta)
+        {
+            int r = Math.Max(0, Math.Min(255, color.R + delta));
+            int g = Math.Max(0, Math.Min(255, color.G + delta));
+            int b = Math.Max(0, Math.Min(255, color.B + delta));
+            return WpfColor.FromArgb(color.A, (byte)r, (byte)g, (byte)b);
+        }
+
+        private void AttachCameraOrientationSync()
+        {
+            if (_cameraSyncAttached || _viewerHost?.Camera == null) return;
+
+            _cameraOrientationChangedHandler = (s, e) => UpdateCameraOrientationWidgets(force: false);
+            _cameraLookDirectionDescriptor = DependencyPropertyDescriptor
+                .FromProperty(Media3D.PerspectiveCamera.LookDirectionProperty,
+                              typeof(Media3D.PerspectiveCamera));
+            _cameraUpDirectionDescriptor = DependencyPropertyDescriptor
+                .FromProperty(Media3D.PerspectiveCamera.UpDirectionProperty,
+                              typeof(Media3D.PerspectiveCamera));
+            _cameraPositionDescriptor = DependencyPropertyDescriptor
+                .FromProperty(Media3D.PerspectiveCamera.PositionProperty,
+                              typeof(Media3D.PerspectiveCamera));
+
+            if (_cameraLookDirectionDescriptor != null)
+                _cameraLookDirectionDescriptor.AddValueChanged(_viewerHost.Camera, _cameraOrientationChangedHandler);
+            if (_cameraUpDirectionDescriptor != null)
+                _cameraUpDirectionDescriptor.AddValueChanged(_viewerHost.Camera, _cameraOrientationChangedHandler);
+            if (_cameraPositionDescriptor != null)
+                _cameraPositionDescriptor.AddValueChanged(_viewerHost.Camera, _cameraOrientationChangedHandler);
+
+            CompositionTarget.Rendering += OnCameraRenderTick;
+            _cameraSyncAttached = true;
+        }
+
+        private void DetachCameraOrientationSync()
+        {
+            if (!_cameraSyncAttached || _viewerHost?.Camera == null) return;
+
+            if (_cameraLookDirectionDescriptor != null && _cameraOrientationChangedHandler != null)
+                _cameraLookDirectionDescriptor.RemoveValueChanged(_viewerHost.Camera, _cameraOrientationChangedHandler);
+            if (_cameraUpDirectionDescriptor != null && _cameraOrientationChangedHandler != null)
+                _cameraUpDirectionDescriptor.RemoveValueChanged(_viewerHost.Camera, _cameraOrientationChangedHandler);
+            if (_cameraPositionDescriptor != null && _cameraOrientationChangedHandler != null)
+                _cameraPositionDescriptor.RemoveValueChanged(_viewerHost.Camera, _cameraOrientationChangedHandler);
+
+            CompositionTarget.Rendering -= OnCameraRenderTick;
+
+            _cameraLookDirectionDescriptor = null;
+            _cameraUpDirectionDescriptor = null;
+            _cameraPositionDescriptor = null;
+            _cameraOrientationChangedHandler = null;
+            _cameraSyncAttached = false;
+            _hasCameraSnapshot = false;
+        }
+
+        private void OnCameraRenderTick(object sender, EventArgs e)
+        {
+            UpdateCameraOrientationWidgets(force: false);
+        }
+
+        private void UpdateCameraOrientationWidgets(bool force)
+        {
+            if (_viewerHost?.Camera == null || _viewport == null) return;
+
+            var position = _viewerHost.Camera.Position;
             var look = _viewerHost.Camera.LookDirection;
-            double heading = Math.Atan2(look.X, -look.Z) * (180.0 / Math.PI);
-            _compassRotate.Angle = -heading;
+            var up = _viewerHost.Camera.UpDirection;
+
+            bool changed = force || !_hasCameraSnapshot
+                || !IsClose(position, _lastCameraPosition)
+                || !IsClose(look, _lastCameraLookDirection)
+                || !IsClose(up, _lastCameraUpDirection);
+
+            if (!changed) return;
+
+            _lastCameraPosition = position;
+            _lastCameraLookDirection = look;
+            _lastCameraUpDirection = up;
+            _hasCameraSnapshot = true;
+
+            UpdateOrientationCubeVisual();
+            _viewport.InvalidateVisual();
+        }
+
+        private static bool IsClose(Media3D.Point3D a, Media3D.Point3D b)
+        {
+            const double eps = 0.000001;
+            return Math.Abs(a.X - b.X) < eps
+                && Math.Abs(a.Y - b.Y) < eps
+                && Math.Abs(a.Z - b.Z) < eps;
+        }
+
+        private static bool IsClose(Media3D.Vector3D a, Media3D.Vector3D b)
+        {
+            const double eps = 0.000001;
+            return Math.Abs(a.X - b.X) < eps
+                && Math.Abs(a.Y - b.Y) < eps
+                && Math.Abs(a.Z - b.Z) < eps;
         }
 
         /// <summary>

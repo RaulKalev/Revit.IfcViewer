@@ -15,6 +15,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using Media3D = System.Windows.Media.Media3D;
 
 namespace IfcViewer.UI
 {
@@ -706,6 +707,15 @@ namespace IfcViewer.UI
                 _selectedOriginalEmissive = mat.EmissiveColor;
                 mat.EmissiveColor = new Color4(0.08f, 0.42f, 0.42f, 1f);
             }
+
+            // Orbit around the selected element's centre when right-dragging.
+            if (_viewport != null && mesh.Geometry != null)
+            {
+                var bb = mesh.Geometry.Bound;
+                var c  = (bb.Minimum + bb.Maximum) * 0.5f;
+                _viewport.FixedRotationPoint        = new Media3D.Point3D(c.X, c.Y, c.Z);
+                _viewport.FixedRotationPointEnabled = true;
+            }
         }
 
         private void SelectElement(MeshGeometryModel3D mesh, IfcElementInfo info)
@@ -730,6 +740,10 @@ namespace IfcViewer.UI
 
             _selectedMesh = null;
             HideProperties();
+
+            // Restore default orbit behaviour (scene-centre / mouse-down pivot).
+            if (_viewport != null)
+                _viewport.FixedRotationPointEnabled = false;
         }
 
         /// <summary>

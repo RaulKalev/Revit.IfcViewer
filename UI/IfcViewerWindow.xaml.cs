@@ -98,6 +98,41 @@ namespace IfcViewer.UI
         private readonly Dictionary<string, TextBlock> _compassLabels
             = new Dictionary<string, TextBlock>(StringComparer.Ordinal);
         private enum OrientationCubeFace { Front, Back, Left, Right, Top, Bottom }
+        private enum OrientationArrowDirection { Left, Right, Up, Down }
+        private struct OrientationCubeEdgeSpec
+        {
+            public readonly int V0;
+            public readonly int V1;
+            public readonly OrientationCubeFace FaceA;
+            public readonly OrientationCubeFace FaceB;
+
+            public OrientationCubeEdgeSpec(int v0, int v1, OrientationCubeFace faceA, OrientationCubeFace faceB)
+            {
+                V0 = v0;
+                V1 = v1;
+                FaceA = faceA;
+                FaceB = faceB;
+            }
+        }
+        private struct OrientationCubeCornerSpec
+        {
+            public readonly int Vertex;
+            public readonly OrientationCubeFace FaceA;
+            public readonly OrientationCubeFace FaceB;
+            public readonly OrientationCubeFace FaceC;
+
+            public OrientationCubeCornerSpec(
+                int vertex,
+                OrientationCubeFace faceA,
+                OrientationCubeFace faceB,
+                OrientationCubeFace faceC)
+            {
+                Vertex = vertex;
+                FaceA = faceA;
+                FaceB = faceB;
+                FaceC = faceC;
+            }
+        }
         private readonly Dictionary<OrientationCubeFace, WpfShapes.Polygon> _orientationCubeFaces
             = new Dictionary<OrientationCubeFace, WpfShapes.Polygon>();
         private readonly Dictionary<OrientationCubeFace, TextBlock> _orientationCubeFaceLabels
@@ -106,7 +141,30 @@ namespace IfcViewer.UI
             = new Dictionary<OrientationCubeFace, SolidColorBrush>();
         private readonly Dictionary<OrientationCubeFace, SolidColorBrush> _orientationCubeFaceHoverBrushes
             = new Dictionary<OrientationCubeFace, SolidColorBrush>();
+        private readonly Dictionary<int, WpfShapes.Polygon> _orientationCubeEdgeHotspots
+            = new Dictionary<int, WpfShapes.Polygon>();
+        private readonly Dictionary<int, WpfShapes.Ellipse> _orientationCubeCornerHotspots
+            = new Dictionary<int, WpfShapes.Ellipse>();
+        private readonly Dictionary<OrientationArrowDirection, WpfShapes.Polygon> _orientationCubeArrowButtons
+            = new Dictionary<OrientationArrowDirection, WpfShapes.Polygon>();
+        private readonly Dictionary<OrientationArrowDirection, OrientationCubeFace> _orientationCubeArrowTargets
+            = new Dictionary<OrientationArrowDirection, OrientationCubeFace>();
+        private readonly SolidColorBrush _orientationArrowFillBrush
+            = new SolidColorBrush(WpfColor.FromArgb(230, 205, 205, 205));
+        private readonly SolidColorBrush _orientationArrowHoverFillBrush
+            = new SolidColorBrush(WpfColor.FromArgb(245, 170, 170, 170));
+        private readonly SolidColorBrush _orientationEdgeHoverFillBrush
+            = new SolidColorBrush(WpfColor.FromArgb(110, 142, 196, 255));
+        private readonly SolidColorBrush _orientationEdgeHoverStrokeBrush
+            = new SolidColorBrush(WpfColor.FromArgb(235, 90, 153, 232));
+        private readonly SolidColorBrush _orientationCornerHoverFillBrush
+            = new SolidColorBrush(WpfColor.FromArgb(145, 142, 196, 255));
+        private readonly SolidColorBrush _orientationCornerHoverStrokeBrush
+            = new SolidColorBrush(WpfColor.FromArgb(245, 90, 153, 232));
         private OrientationCubeFace? _hoveredOrientationCubeFace;
+        private OrientationArrowDirection? _hoveredOrientationArrow;
+        private int? _hoveredOrientationEdgeIndex;
+        private int? _hoveredOrientationCornerIndex;
         private static readonly OrientationCubeFace[] OrientationCubeFaceOrder = new[]
         {
             OrientationCubeFace.Front,
@@ -115,6 +173,13 @@ namespace IfcViewer.UI
             OrientationCubeFace.Right,
             OrientationCubeFace.Top,
             OrientationCubeFace.Bottom,
+        };
+        private static readonly OrientationArrowDirection[] OrientationArrowOrder = new[]
+        {
+            OrientationArrowDirection.Left,
+            OrientationArrowDirection.Right,
+            OrientationArrowDirection.Up,
+            OrientationArrowDirection.Down,
         };
         private static readonly Media3D.Point3D[] OrientationCubeVertices = new[]
         {
@@ -133,6 +198,32 @@ namespace IfcViewer.UI
         private static readonly int[] OrientationFaceRight  = { 1, 5, 6, 2 };
         private static readonly int[] OrientationFaceTop    = { 3, 2, 6, 7 };
         private static readonly int[] OrientationFaceBottom = { 0, 1, 5, 4 };
+        private static readonly OrientationCubeEdgeSpec[] OrientationCubeEdges = new[]
+        {
+            new OrientationCubeEdgeSpec(0, 1, OrientationCubeFace.Front, OrientationCubeFace.Bottom),
+            new OrientationCubeEdgeSpec(1, 2, OrientationCubeFace.Front, OrientationCubeFace.Right),
+            new OrientationCubeEdgeSpec(2, 3, OrientationCubeFace.Front, OrientationCubeFace.Top),
+            new OrientationCubeEdgeSpec(3, 0, OrientationCubeFace.Front, OrientationCubeFace.Left),
+            new OrientationCubeEdgeSpec(4, 5, OrientationCubeFace.Back,  OrientationCubeFace.Bottom),
+            new OrientationCubeEdgeSpec(5, 6, OrientationCubeFace.Back,  OrientationCubeFace.Right),
+            new OrientationCubeEdgeSpec(6, 7, OrientationCubeFace.Back,  OrientationCubeFace.Top),
+            new OrientationCubeEdgeSpec(7, 4, OrientationCubeFace.Back,  OrientationCubeFace.Left),
+            new OrientationCubeEdgeSpec(0, 4, OrientationCubeFace.Left,  OrientationCubeFace.Bottom),
+            new OrientationCubeEdgeSpec(1, 5, OrientationCubeFace.Right, OrientationCubeFace.Bottom),
+            new OrientationCubeEdgeSpec(2, 6, OrientationCubeFace.Right, OrientationCubeFace.Top),
+            new OrientationCubeEdgeSpec(3, 7, OrientationCubeFace.Left,  OrientationCubeFace.Top),
+        };
+        private static readonly OrientationCubeCornerSpec[] OrientationCubeCorners = new[]
+        {
+            new OrientationCubeCornerSpec(0, OrientationCubeFace.Left,  OrientationCubeFace.Bottom, OrientationCubeFace.Front),
+            new OrientationCubeCornerSpec(1, OrientationCubeFace.Right, OrientationCubeFace.Bottom, OrientationCubeFace.Front),
+            new OrientationCubeCornerSpec(2, OrientationCubeFace.Right, OrientationCubeFace.Top,    OrientationCubeFace.Front),
+            new OrientationCubeCornerSpec(3, OrientationCubeFace.Left,  OrientationCubeFace.Top,    OrientationCubeFace.Front),
+            new OrientationCubeCornerSpec(4, OrientationCubeFace.Left,  OrientationCubeFace.Bottom, OrientationCubeFace.Back),
+            new OrientationCubeCornerSpec(5, OrientationCubeFace.Right, OrientationCubeFace.Bottom, OrientationCubeFace.Back),
+            new OrientationCubeCornerSpec(6, OrientationCubeFace.Right, OrientationCubeFace.Top,    OrientationCubeFace.Back),
+            new OrientationCubeCornerSpec(7, OrientationCubeFace.Left,  OrientationCubeFace.Top,    OrientationCubeFace.Back),
+        };
         private const double OrientationCubeScale = 14.0;
         private double _orientationCubeCenterX;
         private double _orientationCubeCenterY;
@@ -1191,7 +1282,14 @@ namespace IfcViewer.UI
             _orientationCubeFaceLabels.Clear();
             _orientationCubeFaceBrushes.Clear();
             _orientationCubeFaceHoverBrushes.Clear();
+            _orientationCubeEdgeHotspots.Clear();
+            _orientationCubeCornerHotspots.Clear();
+            _orientationCubeArrowButtons.Clear();
+            _orientationCubeArrowTargets.Clear();
             _hoveredOrientationCubeFace = null;
+            _hoveredOrientationArrow = null;
+            _hoveredOrientationEdgeIndex = null;
+            _hoveredOrientationCornerIndex = null;
 
             foreach (var face in OrientationCubeFaceOrder)
             {
@@ -1230,6 +1328,65 @@ namespace IfcViewer.UI
                 };
                 _orientationCubeFaceLabels.Add(face, label);
                 canvas.Children.Add(label);
+            }
+
+            for (int i = 0; i < OrientationCubeEdges.Length; i++)
+            {
+                var edgeHotspot = new WpfShapes.Polygon
+                {
+                    Fill             = Brushes.Transparent,
+                    Stroke           = Brushes.Transparent,
+                    StrokeThickness  = 1.2,
+                    Visibility       = System.Windows.Visibility.Collapsed,
+                    IsHitTestVisible = true,
+                    Cursor           = Cursors.Hand,
+                    Tag              = i,
+                };
+                edgeHotspot.MouseEnter += OrientationCubeEdge_MouseEnter;
+                edgeHotspot.MouseLeave += OrientationCubeEdge_MouseLeave;
+                edgeHotspot.MouseLeftButtonDown += OrientationCubeEdge_MouseLeftButtonDown;
+                _orientationCubeEdgeHotspots[i] = edgeHotspot;
+                canvas.Children.Add(edgeHotspot);
+            }
+
+            for (int i = 0; i < OrientationCubeCorners.Length; i++)
+            {
+                var cornerHotspot = new WpfShapes.Ellipse
+                {
+                    Width            = 8.0,
+                    Height           = 8.0,
+                    Fill             = Brushes.Transparent,
+                    Stroke           = Brushes.Transparent,
+                    StrokeThickness  = 1.1,
+                    Visibility       = System.Windows.Visibility.Collapsed,
+                    IsHitTestVisible = true,
+                    Cursor           = Cursors.Hand,
+                    Tag              = i,
+                };
+                cornerHotspot.MouseEnter += OrientationCubeCorner_MouseEnter;
+                cornerHotspot.MouseLeave += OrientationCubeCorner_MouseLeave;
+                cornerHotspot.MouseLeftButtonDown += OrientationCubeCorner_MouseLeftButtonDown;
+                _orientationCubeCornerHotspots[i] = cornerHotspot;
+                canvas.Children.Add(cornerHotspot);
+            }
+
+            foreach (var direction in OrientationArrowOrder)
+            {
+                var arrow = new WpfShapes.Polygon
+                {
+                    Fill             = _orientationArrowFillBrush,
+                    Stroke           = new SolidColorBrush(WpfColor.FromArgb(255, 95, 95, 95)),
+                    StrokeThickness  = 1.0,
+                    Visibility       = System.Windows.Visibility.Collapsed,
+                    IsHitTestVisible = true,
+                    Cursor           = Cursors.Hand,
+                    Tag              = direction,
+                };
+                arrow.MouseEnter += OrientationArrow_MouseEnter;
+                arrow.MouseLeave += OrientationArrow_MouseLeave;
+                arrow.MouseLeftButtonDown += OrientationArrow_MouseLeftButtonDown;
+                _orientationCubeArrowButtons[direction] = arrow;
+                canvas.Children.Add(arrow);
             }
         }
 
@@ -1301,6 +1458,11 @@ namespace IfcViewer.UI
 
             UpdateCompass3DVisual(right, up, forward);
 
+            var projectedVertices = new WpfPoint[OrientationCubeVertices.Length];
+            var projectedDepths = new double[OrientationCubeVertices.Length];
+            for (int i = 0; i < OrientationCubeVertices.Length; i++)
+                projectedVertices[i] = ProjectWidgetPoint(OrientationCubeVertices[i], right, up, forward, out projectedDepths[i]);
+
             var visibleFaces = new List<KeyValuePair<OrientationCubeFace, double>>();
 
             foreach (var face in OrientationCubeFaceOrder)
@@ -1321,10 +1483,8 @@ namespace IfcViewer.UI
 
                 for (int i = 0; i < indices.Length; i++)
                 {
-                    double pointDepth;
-                    var projected = ProjectWidgetPoint(OrientationCubeVertices[indices[i]], right, up, forward, out pointDepth);
-                    points.Add(projected);
-                    depth += pointDepth;
+                    points.Add(projectedVertices[indices[i]]);
+                    depth += projectedDepths[indices[i]];
                 }
 
                 poly.Points = points;
@@ -1353,6 +1513,9 @@ namespace IfcViewer.UI
                 if (!isVisible)
                     _orientationCubeFaceLabels[face].Visibility = System.Windows.Visibility.Collapsed;
             }
+
+            UpdateOrientationCubeEdgeAndCornerHotspots(visibleFaces, projectedVertices, projectedDepths);
+            UpdateOrientationCubeArrows(visibleFaces);
 
             if (_hoveredOrientationCubeFace.HasValue)
             {
@@ -1417,18 +1580,410 @@ namespace IfcViewer.UI
                 poly.Fill = brush;
         }
 
+        private void OrientationCubeEdge_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            var poly = sender as WpfShapes.Polygon;
+            if (poly == null || !(poly.Tag is int)) return;
+
+            int edgeIndex = (int)poly.Tag;
+            if (edgeIndex < 0 || edgeIndex >= OrientationCubeEdges.Length) return;
+
+            var edge = OrientationCubeEdges[edgeIndex];
+            SnapCameraToOrientationNormals(
+                GetOrientationCubeFaceNormal(edge.FaceA),
+                GetOrientationCubeFaceNormal(edge.FaceB));
+            e.Handled = true;
+        }
+
+        private void OrientationCubeEdge_MouseEnter(object sender, MouseEventArgs e)
+        {
+            var poly = sender as WpfShapes.Polygon;
+            if (poly == null || !(poly.Tag is int)) return;
+
+            int edgeIndex = (int)poly.Tag;
+            _hoveredOrientationEdgeIndex = edgeIndex;
+            ApplyOrientationCubeEdgeHighlight(edgeIndex, poly);
+        }
+
+        private void OrientationCubeEdge_MouseLeave(object sender, MouseEventArgs e)
+        {
+            var poly = sender as WpfShapes.Polygon;
+            if (poly == null || !(poly.Tag is int)) return;
+
+            int edgeIndex = (int)poly.Tag;
+            if (_hoveredOrientationEdgeIndex.HasValue && _hoveredOrientationEdgeIndex.Value == edgeIndex)
+                _hoveredOrientationEdgeIndex = null;
+            ApplyOrientationCubeEdgeHighlight(edgeIndex, poly);
+        }
+
+        private void OrientationCubeCorner_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            var ellipse = sender as WpfShapes.Ellipse;
+            if (ellipse == null || !(ellipse.Tag is int)) return;
+
+            int cornerIndex = (int)ellipse.Tag;
+            if (cornerIndex < 0 || cornerIndex >= OrientationCubeCorners.Length) return;
+
+            var corner = OrientationCubeCorners[cornerIndex];
+            SnapCameraToOrientationNormals(
+                GetOrientationCubeFaceNormal(corner.FaceA),
+                GetOrientationCubeFaceNormal(corner.FaceB),
+                GetOrientationCubeFaceNormal(corner.FaceC));
+            e.Handled = true;
+        }
+
+        private void OrientationCubeCorner_MouseEnter(object sender, MouseEventArgs e)
+        {
+            var ellipse = sender as WpfShapes.Ellipse;
+            if (ellipse == null || !(ellipse.Tag is int)) return;
+
+            int cornerIndex = (int)ellipse.Tag;
+            _hoveredOrientationCornerIndex = cornerIndex;
+            ApplyOrientationCubeCornerHighlight(cornerIndex, ellipse);
+        }
+
+        private void OrientationCubeCorner_MouseLeave(object sender, MouseEventArgs e)
+        {
+            var ellipse = sender as WpfShapes.Ellipse;
+            if (ellipse == null || !(ellipse.Tag is int)) return;
+
+            int cornerIndex = (int)ellipse.Tag;
+            if (_hoveredOrientationCornerIndex.HasValue && _hoveredOrientationCornerIndex.Value == cornerIndex)
+                _hoveredOrientationCornerIndex = null;
+            ApplyOrientationCubeCornerHighlight(cornerIndex, ellipse);
+        }
+
+        private void ApplyOrientationCubeEdgeHighlight(int edgeIndex, WpfShapes.Polygon hotspot)
+        {
+            if (hotspot == null) return;
+            bool isHovered = _hoveredOrientationEdgeIndex.HasValue && _hoveredOrientationEdgeIndex.Value == edgeIndex;
+            hotspot.Fill = isHovered ? _orientationEdgeHoverFillBrush : Brushes.Transparent;
+            hotspot.Stroke = isHovered ? _orientationEdgeHoverStrokeBrush : Brushes.Transparent;
+        }
+
+        private void ApplyOrientationCubeCornerHighlight(int cornerIndex, WpfShapes.Ellipse hotspot)
+        {
+            if (hotspot == null) return;
+            bool isHovered = _hoveredOrientationCornerIndex.HasValue && _hoveredOrientationCornerIndex.Value == cornerIndex;
+            hotspot.Fill = isHovered ? _orientationCornerHoverFillBrush : Brushes.Transparent;
+            hotspot.Stroke = isHovered ? _orientationCornerHoverStrokeBrush : Brushes.Transparent;
+        }
+
+        private void OrientationArrow_MouseEnter(object sender, MouseEventArgs e)
+        {
+            var poly = sender as WpfShapes.Polygon;
+            if (poly == null || !(poly.Tag is OrientationArrowDirection)) return;
+
+            var direction = (OrientationArrowDirection)poly.Tag;
+            _hoveredOrientationArrow = direction;
+            ApplyOrientationArrowFill(direction, poly);
+        }
+
+        private void OrientationArrow_MouseLeave(object sender, MouseEventArgs e)
+        {
+            var poly = sender as WpfShapes.Polygon;
+            if (poly == null || !(poly.Tag is OrientationArrowDirection)) return;
+
+            var direction = (OrientationArrowDirection)poly.Tag;
+            if (_hoveredOrientationArrow.HasValue && _hoveredOrientationArrow.Value == direction)
+                _hoveredOrientationArrow = null;
+            ApplyOrientationArrowFill(direction, poly);
+        }
+
+        private void OrientationArrow_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            var poly = sender as WpfShapes.Polygon;
+            if (poly == null || !(poly.Tag is OrientationArrowDirection)) return;
+
+            var direction = (OrientationArrowDirection)poly.Tag;
+            OrientationCubeFace targetFace;
+            if (_orientationCubeArrowTargets.TryGetValue(direction, out targetFace))
+                SnapCameraToOrientationFace(targetFace);
+
+            e.Handled = true;
+        }
+
+        private void UpdateOrientationCubeEdgeAndCornerHotspots(
+            List<KeyValuePair<OrientationCubeFace, double>> visibleFaces,
+            WpfPoint[] projectedVertices,
+            double[] projectedDepths)
+        {
+            var visibleSet = new HashSet<OrientationCubeFace>();
+            for (int i = 0; i < visibleFaces.Count; i++)
+                visibleSet.Add(visibleFaces[i].Key);
+
+            const double edgeThickness = 6.0;
+            for (int i = 0; i < OrientationCubeEdges.Length; i++)
+            {
+                WpfShapes.Polygon hotspot;
+                if (!_orientationCubeEdgeHotspots.TryGetValue(i, out hotspot)) continue;
+
+                var edge = OrientationCubeEdges[i];
+                bool show = visibleSet.Contains(edge.FaceA) || visibleSet.Contains(edge.FaceB);
+                if (!show)
+                {
+                    if (_hoveredOrientationEdgeIndex.HasValue && _hoveredOrientationEdgeIndex.Value == i)
+                        _hoveredOrientationEdgeIndex = null;
+                    hotspot.Visibility = System.Windows.Visibility.Collapsed;
+                    continue;
+                }
+
+                var a = projectedVertices[edge.V0];
+                var b = projectedVertices[edge.V1];
+                double dx = b.X - a.X;
+                double dy = b.Y - a.Y;
+                double len = Math.Sqrt(dx * dx + dy * dy);
+                if (len < 0.001)
+                {
+                    hotspot.Visibility = System.Windows.Visibility.Collapsed;
+                    continue;
+                }
+
+                double nx = -dy / len * edgeThickness * 0.5;
+                double ny =  dx / len * edgeThickness * 0.5;
+
+                hotspot.Points = new PointCollection
+                {
+                    new WpfPoint(a.X + nx, a.Y + ny),
+                    new WpfPoint(b.X + nx, b.Y + ny),
+                    new WpfPoint(b.X - nx, b.Y - ny),
+                    new WpfPoint(a.X - nx, a.Y - ny),
+                };
+                hotspot.Visibility = System.Windows.Visibility.Visible;
+                Panel.SetZIndex(hotspot, 300);
+                ApplyOrientationCubeEdgeHighlight(i, hotspot);
+            }
+
+            const double cornerSize = 8.0;
+            for (int i = 0; i < OrientationCubeCorners.Length; i++)
+            {
+                WpfShapes.Ellipse hotspot;
+                if (!_orientationCubeCornerHotspots.TryGetValue(i, out hotspot)) continue;
+
+                var corner = OrientationCubeCorners[i];
+                bool show = projectedDepths[corner.Vertex] > 0.0
+                    && (visibleSet.Contains(corner.FaceA)
+                        || visibleSet.Contains(corner.FaceB)
+                        || visibleSet.Contains(corner.FaceC));
+                if (!show)
+                {
+                    if (_hoveredOrientationCornerIndex.HasValue && _hoveredOrientationCornerIndex.Value == i)
+                        _hoveredOrientationCornerIndex = null;
+                    hotspot.Visibility = System.Windows.Visibility.Collapsed;
+                    continue;
+                }
+
+                var p = projectedVertices[corner.Vertex];
+                Canvas.SetLeft(hotspot, p.X - cornerSize * 0.5);
+                Canvas.SetTop(hotspot,  p.Y - cornerSize * 0.5);
+                hotspot.Visibility = System.Windows.Visibility.Visible;
+                Panel.SetZIndex(hotspot, 310);
+                ApplyOrientationCubeCornerHighlight(i, hotspot);
+            }
+        }
+
+        private void UpdateOrientationCubeArrows(List<KeyValuePair<OrientationCubeFace, double>> visibleFaces)
+        {
+            if (visibleFaces.Count != 1)
+            {
+                HideOrientationCubeArrows();
+                return;
+            }
+
+            var face = visibleFaces[0].Key;
+            WpfShapes.Polygon facePoly;
+            if (!_orientationCubeFaces.TryGetValue(face, out facePoly)
+                || facePoly.Points == null
+                || facePoly.Points.Count < 4)
+            {
+                HideOrientationCubeArrows();
+                return;
+            }
+
+            var points = facePoly.Points;
+            var p0 = points[0];
+            var p1 = points[1];
+            var p3 = points[3];
+
+            var center = PolygonCentroid(points);
+            var xAxis = new Media3D.Vector3D(p1.X - p0.X, p1.Y - p0.Y, 0.0);
+            var yAxis = new Media3D.Vector3D(p3.X - p0.X, p3.Y - p0.Y, 0.0);
+            double xLen = Math.Sqrt(xAxis.X * xAxis.X + xAxis.Y * xAxis.Y);
+            double yLen = Math.Sqrt(yAxis.X * yAxis.X + yAxis.Y * yAxis.Y);
+            if (xLen < 0.001 || yLen < 0.001)
+            {
+                HideOrientationCubeArrows();
+                return;
+            }
+
+            xAxis = new Media3D.Vector3D(xAxis.X / xLen, xAxis.Y / xLen, 0.0);
+            yAxis = new Media3D.Vector3D(yAxis.X / yLen, yAxis.Y / yLen, 0.0);
+
+            var indices = GetOrientationCubeFaceIndices(face);
+            var v0 = OrientationCubeVertices[indices[0]];
+            var v1 = OrientationCubeVertices[indices[1]];
+            var v3 = OrientationCubeVertices[indices[3]];
+
+            var localX = new Media3D.Vector3D(v1.X - v0.X, v1.Y - v0.Y, v1.Z - v0.Z);
+            var localY = new Media3D.Vector3D(v3.X - v0.X, v3.Y - v0.Y, v3.Z - v0.Z);
+            if (localX.LengthSquared < 1e-9 || localY.LengthSquared < 1e-9)
+            {
+                HideOrientationCubeArrows();
+                return;
+            }
+            localX.Normalize();
+            localY.Normalize();
+
+            _orientationCubeArrowTargets[OrientationArrowDirection.Left] = GetOrientationFaceFromNormal(
+                new Media3D.Vector3D(-localX.X, -localX.Y, -localX.Z));
+            _orientationCubeArrowTargets[OrientationArrowDirection.Right] = GetOrientationFaceFromNormal(localX);
+            _orientationCubeArrowTargets[OrientationArrowDirection.Up] = GetOrientationFaceFromNormal(localY);
+            _orientationCubeArrowTargets[OrientationArrowDirection.Down] = GetOrientationFaceFromNormal(
+                new Media3D.Vector3D(-localY.X, -localY.Y, -localY.Z));
+
+            PositionOrientationArrow(
+                OrientationArrowDirection.Left,
+                center, xAxis, yAxis, xLen * 0.5, yLen * 0.5);
+            PositionOrientationArrow(
+                OrientationArrowDirection.Right,
+                center, xAxis, yAxis, xLen * 0.5, yLen * 0.5);
+            PositionOrientationArrow(
+                OrientationArrowDirection.Up,
+                center, xAxis, yAxis, xLen * 0.5, yLen * 0.5);
+            PositionOrientationArrow(
+                OrientationArrowDirection.Down,
+                center, xAxis, yAxis, xLen * 0.5, yLen * 0.5);
+        }
+
+        private void PositionOrientationArrow(
+            OrientationArrowDirection direction,
+            WpfPoint center,
+            Media3D.Vector3D xAxis,
+            Media3D.Vector3D yAxis,
+            double halfWidth,
+            double halfHeight)
+        {
+            WpfShapes.Polygon arrow;
+            if (!_orientationCubeArrowButtons.TryGetValue(direction, out arrow)) return;
+
+            // Arrow is drawn as a balanced triangle inside an invisible square.
+            const double arrowBoxSize = 10.0;
+            const double arrowGapFromCube = 5.5;
+            double arrowBoxHalf = arrowBoxSize * 0.5;
+            double triHeight = arrowBoxSize * 0.68;
+            double triHalfBase = triHeight / Math.Sqrt(3.0);
+            // Tip must face toward the cube.
+            double tipOffset = -triHeight * 0.5;
+            double baseOffset = triHeight * 0.5;
+
+            Media3D.Vector3D outward;
+            Media3D.Vector3D side;
+            double edgeDistance;
+            switch (direction)
+            {
+                case OrientationArrowDirection.Left:
+                    outward = new Media3D.Vector3D(-xAxis.X, -xAxis.Y, 0.0);
+                    side = yAxis;
+                    edgeDistance = halfWidth;
+                    break;
+                case OrientationArrowDirection.Right:
+                    outward = xAxis;
+                    side = yAxis;
+                    edgeDistance = halfWidth;
+                    break;
+                case OrientationArrowDirection.Up:
+                    outward = yAxis;
+                    side = xAxis;
+                    edgeDistance = halfHeight;
+                    break;
+                default:
+                    outward = new Media3D.Vector3D(-yAxis.X, -yAxis.Y, 0.0);
+                    side = xAxis;
+                    edgeDistance = halfHeight;
+                    break;
+            }
+
+            var arrowCenter = new WpfPoint(
+                center.X + outward.X * (edgeDistance + arrowGapFromCube + arrowBoxHalf),
+                center.Y + outward.Y * (edgeDistance + arrowGapFromCube + arrowBoxHalf));
+
+            var tip = new WpfPoint(
+                arrowCenter.X + outward.X * tipOffset,
+                arrowCenter.Y + outward.Y * tipOffset);
+            var baseCenter = new WpfPoint(
+                arrowCenter.X + outward.X * baseOffset,
+                arrowCenter.Y + outward.Y * baseOffset);
+
+            arrow.Points = new PointCollection
+            {
+                tip,
+                new WpfPoint(baseCenter.X + side.X * triHalfBase, baseCenter.Y + side.Y * triHalfBase),
+                new WpfPoint(baseCenter.X - side.X * triHalfBase, baseCenter.Y - side.Y * triHalfBase),
+            };
+            arrow.Visibility = System.Windows.Visibility.Visible;
+            Panel.SetZIndex(arrow, 360);
+            ApplyOrientationArrowFill(direction, arrow);
+        }
+
+        private void HideOrientationCubeArrows()
+        {
+            _orientationCubeArrowTargets.Clear();
+            _hoveredOrientationArrow = null;
+            foreach (var direction in OrientationArrowOrder)
+            {
+                WpfShapes.Polygon arrow;
+                if (_orientationCubeArrowButtons.TryGetValue(direction, out arrow))
+                    arrow.Visibility = System.Windows.Visibility.Collapsed;
+            }
+        }
+
+        private void ApplyOrientationArrowFill(OrientationArrowDirection direction, WpfShapes.Polygon arrow)
+        {
+            if (arrow == null) return;
+
+            bool isHovered = _hoveredOrientationArrow.HasValue && _hoveredOrientationArrow.Value == direction;
+            arrow.Fill = isHovered ? _orientationArrowHoverFillBrush : _orientationArrowFillBrush;
+        }
+
         private void SnapCameraToOrientationFace(OrientationCubeFace face)
         {
+            SnapCameraToOrientationNormals(GetOrientationCubeFaceNormal(face));
+        }
+
+        private void SnapCameraToOrientationNormals(params Media3D.Vector3D[] outwardNormals)
+        {
+            if (_viewerHost?.Camera == null || outwardNormals == null || outwardNormals.Length == 0) return;
+
+            var outward = new Media3D.Vector3D(0, 0, 0);
+            for (int i = 0; i < outwardNormals.Length; i++)
+            {
+                outward.X += outwardNormals[i].X;
+                outward.Y += outwardNormals[i].Y;
+                outward.Z += outwardNormals[i].Z;
+            }
+
+            if (outward.LengthSquared < 1e-9) return;
+            outward.Normalize();
+
+            var viewDirection = new Media3D.Vector3D(-outward.X, -outward.Y, -outward.Z);
+            var upDirection = ComputeCameraUpDirection(viewDirection);
+            SnapCameraToOrientation(viewDirection, upDirection);
+        }
+
+        private void SnapCameraToOrientation(Media3D.Vector3D viewDirection, Media3D.Vector3D upDirection)
+        {
             if (_viewerHost?.Camera == null) return;
+            if (viewDirection.LengthSquared < 1e-9) return;
+            if (upDirection.LengthSquared < 1e-9) upDirection = new Media3D.Vector3D(0, 1, 0);
 
             var camera = _viewerHost.Camera;
             double distance = camera.LookDirection.Length;
             if (distance < 0.001) distance = 10.0;
 
-            var target = camera.Position + camera.LookDirection;
-            var viewDirection = GetOrientationFaceViewDirection(face);
-            var upDirection = GetOrientationFaceUpDirection(face);
+            viewDirection.Normalize();
+            upDirection.Normalize();
 
+            var target = camera.Position + camera.LookDirection;
             var newLookDirection = new Media3D.Vector3D(
                 viewDirection.X * distance,
                 viewDirection.Y * distance,
@@ -1442,27 +1997,52 @@ namespace IfcViewer.UI
             _viewport.InvalidateRender();
         }
 
-        private static Media3D.Vector3D GetOrientationFaceViewDirection(OrientationCubeFace face)
+        private static Media3D.Vector3D ComputeCameraUpDirection(Media3D.Vector3D viewDirection)
         {
-            var normal = GetOrientationCubeFaceNormal(face);
-            var view = new Media3D.Vector3D(-normal.X, -normal.Y, -normal.Z);
-            if (view.LengthSquared < 1e-9)
-                return new Media3D.Vector3D(0, 0, 1);
+            var upHint = new Media3D.Vector3D(0, 1, 0);
+            var view = viewDirection;
+            if (view.LengthSquared < 1e-9) return upHint;
             view.Normalize();
-            return view;
+
+            if (Math.Abs(Media3D.Vector3D.DotProduct(view, upHint)) > 0.97)
+                upHint = new Media3D.Vector3D(0, 0, -1);
+
+            var right = Media3D.Vector3D.CrossProduct(view, upHint);
+            if (right.LengthSquared < 1e-9)
+                right = Media3D.Vector3D.CrossProduct(view, new Media3D.Vector3D(1, 0, 0));
+            if (right.LengthSquared < 1e-9)
+                return new Media3D.Vector3D(0, 1, 0);
+
+            right.Normalize();
+            var up = Media3D.Vector3D.CrossProduct(right, view);
+            if (up.LengthSquared < 1e-9)
+                return new Media3D.Vector3D(0, 1, 0);
+            up.Normalize();
+            return up;
         }
 
-        private static Media3D.Vector3D GetOrientationFaceUpDirection(OrientationCubeFace face)
+        private static OrientationCubeFace GetOrientationFaceFromNormal(Media3D.Vector3D normalDirection)
         {
-            switch (face)
+            if (normalDirection.LengthSquared < 1e-9)
+                return OrientationCubeFace.Front;
+
+            var dir = normalDirection;
+            dir.Normalize();
+
+            var bestFace = OrientationCubeFace.Front;
+            double bestDot = double.NegativeInfinity;
+            foreach (var face in OrientationCubeFaceOrder)
             {
-                case OrientationCubeFace.Top:
-                    return new Media3D.Vector3D(0, 0, -1);
-                case OrientationCubeFace.Bottom:
-                    return new Media3D.Vector3D(0, 0, 1);
-                default:
-                    return new Media3D.Vector3D(0, 1, 0);
+                var normal = GetOrientationCubeFaceNormal(face);
+                double dot = Media3D.Vector3D.DotProduct(dir, normal);
+                if (dot > bestDot)
+                {
+                    bestDot = dot;
+                    bestFace = face;
+                }
             }
+
+            return bestFace;
         }
 
         private static Media3D.Vector3D GetOrientationCubeFaceNormal(OrientationCubeFace face)

@@ -184,12 +184,9 @@ namespace IfcViewer.UI
                 _settings = ViewerSettings.Load();
                 ApplySettings();
 
-                // Edge overlay on by default — hard-edge lines help distinguish object
-                // boundaries in the shaded view without requiring a manual toggle.
-                // RebuildWireframe() returns early here (no geometry loaded yet); the
-                // lifecycle hooks in AddIfc_Click / ApplyRevitUpdate build the overlay
-                // automatically as each model arrives.
-                if (WireframeToggle != null) WireframeToggle.IsChecked = true;
+                // NOTE: WireframeToggle will be enabled when IFC or Revit geometry loads
+                // (see AddIfc_Click, ApplyRevitUpdate). We don't enable it here because
+                // the test scene geometry would trigger wireframe extraction unnecessarily.
 
                 // 11. Intercept scroll wheel at Window level to implement instant, inertia-free
                 //     zoom. Mark e.Handled=true so Helix's smooth animated zoom never fires.
@@ -279,8 +276,11 @@ namespace IfcViewer.UI
                     // Register all cross-section meshes with the section plane manager
                     _sectionMgr?.RegisterGroup(ifcModel.SceneGroup);
 
-                    // Extend the wireframe overlay if it is currently active
-                    if (WireframeToggle?.IsChecked == true) RebuildWireframe();
+                    // Enable wireframe overlay on first model load; rebuild on subsequent loads
+                    if (_loadedModels.Count == 1)
+                        WireframeToggle.IsChecked = true;  // Triggers Wireframe_Checked → RebuildWireframe
+                    else if (WireframeToggle?.IsChecked == true)
+                        RebuildWireframe();
 
                     // Update section slider range to cover the full scene
                     UpdateSectionBounds();
@@ -439,8 +439,12 @@ namespace IfcViewer.UI
 
             if (fitCamera) _viewerHost.FitView(model.Bounds);
 
-            // Rebuild wireframe to reflect the new/changed Revit geometry
-            if (WireframeToggle?.IsChecked == true) RebuildWireframe();
+            // Enable wireframe overlay on first Revit export; rebuild on incremental updates
+            // (WireframeToggle may already be on from IFC loading, so only toggle if needed)
+            if (WireframeToggle?.IsChecked != true)
+                WireframeToggle.IsChecked = true;  // Triggers Wireframe_Checked → RebuildWireframe
+            else
+                RebuildWireframe();
 
             UpdateStatus($"Revit: {model.DisplayName}  |  {model.MeshCount} elements  |  {model.TriangleCount} triangles");
             SessionLogger.Info($"Revit update applied: {model.TriangleCount} triangles");
@@ -501,7 +505,8 @@ namespace IfcViewer.UI
                 _viewerHost.FitView(newModel.Bounds);
 
                 // Rebuild wireframe for the freshly reloaded geometry
-                if (WireframeToggle?.IsChecked == true) RebuildWireframe();
+                if (WireframeToggle?.IsChecked == true)
+                    RebuildWireframe();
 
                 // Restart the watcher for the reloaded path
                 var newWatcher = new IfcFileWatcher(path,

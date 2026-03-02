@@ -64,6 +64,9 @@ namespace IfcViewer.UI
             = new Dictionary<string, CachedIfcModel>(StringComparer.OrdinalIgnoreCase);
         private string _activeIfcFolder;
 
+        // CancellationToken support — cancel previous load when starting a new one
+        private CancellationTokenSource _loadCts;
+
         // Stage 3: Revit sync glue
         private SyncRevitEvent _syncRevitEvent;
         private RevitModel     _revitModel;
@@ -483,6 +486,11 @@ namespace IfcViewer.UI
                     _settings.Save();
                 }
 
+                // Cancel any in-flight IFC load
+                _loadCts?.Cancel();
+                _loadCts?.Dispose();
+                _loadCts = null;
+
                 // Stop auto-sync and dispose file watchers before tearing down the scene.
                 _syncRevitEvent?.StopAutoSync();
                 foreach (var w in _fileWatchers.Values) w.Dispose();
@@ -785,6 +793,10 @@ namespace IfcViewer.UI
             bool loadedFromCache = false;
             try
             {
+                // Cancel any previous in-flight load
+                _loadCts?.Cancel();
+                _loadCts = new CancellationTokenSource();
+
                 DateTime writeUtc = File.GetLastWriteTimeUtc(path);
                 CachedIfcModel cached;
                 IfcModel ifcModel = null;
@@ -799,7 +811,8 @@ namespace IfcViewer.UI
                 }
                 else
                 {
-                    ifcModel = await IfcLoader.LoadAsync(path, Dispatcher, onProgress: UpdateStatus);
+                    ifcModel = await IfcLoader.LoadAsync(path, Dispatcher, onProgress: UpdateStatus,
+                                                      cancellationToken: _loadCts.Token);
                     _ifcModelCache[path] = new CachedIfcModel(ifcModel, writeUtc);
                 }
 
@@ -813,6 +826,12 @@ namespace IfcViewer.UI
                              (loadedFromCache ? "  |  cache" : ""));
                 SessionLogger.Info("Loaded: " + ifcModel.DisplayName +
                                    (loadedFromCache ? " (cache)" : ""));
+            }
+            catch (OperationCanceledException)
+            {
+                // Load was cancelled (e.g. user started a new load or closed the window)
+                SessionLogger.Info("IFC load cancelled: " + path);
+                UpdateStatus("Load cancelled.");
             }
             catch (Exception ex)
             {

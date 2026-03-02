@@ -103,13 +103,16 @@ namespace IfcViewer.Ifc
         /// </summary>
         public static Task<IfcModel> LoadAsync(string filePath,
                                                Dispatcher uiDispatcher,
-                                               Action<string> onProgress = null)
-            => Task.Run(() => LoadCore(filePath, uiDispatcher, onProgress));
+                                               Action<string> onProgress = null,
+                                               CancellationToken cancellationToken = default)
+            => Task.Run(() => LoadCore(filePath, uiDispatcher, onProgress, cancellationToken),
+                        cancellationToken);
 
         // ── Core loader (runs on background thread) ──────────────────────────
         private static IfcModel LoadCore(string filePath,
                                          Dispatcher uiDispatcher,
-                                         Action<string> onProgress)
+                                         Action<string> onProgress,
+                                         CancellationToken cancellationToken)
         {
             void Report(string msg)
             {
@@ -117,6 +120,8 @@ namespace IfcViewer.Ifc
                 if (onProgress != null)
                     uiDispatcher.BeginInvoke(new Action(() => onProgress(msg)));
             }
+
+            cancellationToken.ThrowIfCancellationRequested();
 
             var fileName = Path.GetFileName(filePath);
             Report($"Loading: {fileName}");
@@ -156,6 +161,7 @@ namespace IfcViewer.Ifc
             {
                 using (var model = IfcStore.Open(filePath))
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     Report($"Parsing done ({sw.ElapsedMilliseconds} ms) — tessellating…");
 
                     string cacheFile = filePath + ".wexbim";
@@ -179,6 +185,8 @@ namespace IfcViewer.Ifc
                     SessionLogger.Info($"CreateContext={contextOk}  instances={context.ShapeInstances().Count()}");
 
                     Report($"Tessellation done ({sw.ElapsedMilliseconds} ms) — building scene…");
+
+                    cancellationToken.ThrowIfCancellationRequested();
 
                     float toMetres = (float)(1.0 / model.ModelFactors.OneMetre);
                     var colourMap  = new XbimColourMap();

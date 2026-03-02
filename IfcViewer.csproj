@@ -52,6 +52,10 @@
     <PackageReference Include="Xbim.Geometry" Version="5.1.288" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="IfcCore\IfcCore.csproj" />
+  </ItemGroup>
+
   <!-- Force-copy HelixToolkit.SharpDX.Core (netstandard2.0) to output.
        It doesn't auto-copy for net48 targets. -->
   <ItemGroup>

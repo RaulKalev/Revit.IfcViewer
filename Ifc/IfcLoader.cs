@@ -122,6 +122,19 @@ namespace IfcViewer.Ifc
             Report($"Loading: {fileName}");
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
+            // ── Fast path: skip all xBIM work if processed cache exists ──────
+            // The cache stores the final per-element geometry + element infos
+            // (after wall-layer merging and opening cuts), so loading it is just
+            // a binary file read — typically <100 ms vs 10-30 s from scratch.
+            if (TryLoadCache(filePath, out var cachedBuckets, out var cachedInfos))
+            {
+                sw.Stop();
+                SessionLogger.Info($"IfcLoader: cache hit in {sw.ElapsedMilliseconds} ms ({cachedBuckets.Count} elements).");
+                Report($"Loaded from cache ({cachedBuckets.Count} elements).");
+                return BuildSceneProgressive(filePath, cachedBuckets, cachedInfos,
+                                             cachedBuckets.Count, uiDispatcher, Report);
+            }
+
             // Ensure native geometry engine DLLs are findable before any xBIM call
             string assemblyDir = Path.GetDirectoryName(typeof(IfcLoader).Assembly.Location);
             if (!string.IsNullOrEmpty(assemblyDir))
@@ -182,24 +195,37 @@ namespace IfcViewer.Ifc
                     var openingItems = new List<OpeningShapeItem>();
                     var elementInfos = new Dictionary<int, IfcElementInfo>(); // productLabel → info
                     var wallLayerRelationGroups = BuildWallLayerRelationGroups(model); // wall host label -> layered children
+                    var voidRelations = BuildVoidRelationMap(model, wallLayerRelationGroups); // opening label → set of host+child product labels
+                    var productsWithIncludedGeom = new HashSet<int>();
+                    HashSet<int> productsWithEngineCuts = null;
 
                     using (var storeReader = model.GeometryStore.BeginRead())
                     {
                         // Some products can have multiple geometry representations:
-                        //  - OpeningsAndAdditionsIncluded
-                        //  - OpeningsAndAdditionsExcluded
-                        //  - OpeningsAndAdditionsOnly
-                        // Prefer "Included" per product to avoid filling voids back in.
-                        var representationMaskByProduct = new Dictionary<int, int>();
+                        //  - OpeningsAndAdditionsIncluded  (engine-cut, with voids applied)
+                        //  - OpeningsAndAdditionsExcluded  (raw body, no boolean cuts)
+                        //  - OpeningsAndAdditionsOnly      (feature solids, not product body)
+                        // Prefer "Included" per product so the engine's boolean cuts are used.
+                        //
+                        // productsWithIncludedGeom: ALL products with at least one "Included"
+                        //   shape — used by ShouldSkipByRepresentation to suppress "Excluded"
+                        //   duplicates.
+                        // productsWithEngineCuts: products that have BOTH "Included" AND
+                        //   "Excluded" representations — the engine performed actual boolean
+                        //   operations.  Used to skip the AABB triangle-cull fallback and to
+                        //   discard layer parts (the engine-cut host is authoritative).
+                        var productsWithExcludedGeom = new HashSet<int>();
                         foreach (XbimShapeInstance instance in storeReader.ShapeInstances)
                         {
-                            int product = instance.IfcProductLabel;
-                            int mask = (int)instance.RepresentationType;
-                            if (representationMaskByProduct.TryGetValue(product, out int existing))
-                                representationMaskByProduct[product] = existing | mask;
-                            else
-                                representationMaskByProduct[product] = mask;
+                            if (instance.RepresentationType
+                                == XbimGeometryRepresentationType.OpeningsAndAdditionsIncluded)
+                                productsWithIncludedGeom.Add(instance.IfcProductLabel);
+                            else if (instance.RepresentationType
+                                == XbimGeometryRepresentationType.OpeningsAndAdditionsExcluded)
+                                productsWithExcludedGeom.Add(instance.IfcProductLabel);
                         }
+                        productsWithEngineCuts = new HashSet<int>(productsWithIncludedGeom);
+                        productsWithEngineCuts.IntersectWith(productsWithExcludedGeom);
 
                         foreach (XbimShapeInstance instance in storeReader.ShapeInstances)
                         {
@@ -216,15 +242,20 @@ namespace IfcViewer.Ifc
                                 if (openingGeom?.ShapeData == null || openingGeom.ShapeData.Length == 0)
                                 { diagInvalid++; continue; }
 
+                                // Resolve which host product(s) this opening cuts.
+                                HashSet<int> hostLabels = null;
+                                voidRelations.TryGetValue(instance.IfcProductLabel, out hostLabels);
+
                                 openingItems.Add(new OpeningShapeItem
                                 {
                                     ShapeData = openingGeom.ShapeData,
                                     Transformation = instance.Transformation,
+                                    HostProductLabels = hostLabels,
                                 });
                                 continue;
                             }
 
-                            if (ShouldSkip(instance, entity, representationMaskByProduct))
+                            if (ShouldSkip(instance, entity, productsWithIncludedGeom))
                             {
                                 diagSkipped++;
                                 continue;
@@ -265,7 +296,8 @@ namespace IfcViewer.Ifc
                     SessionLogger.Info($"Phase 1 done: {rawItems.Count} raw items, " +
                                        $"{openingItems.Count} opening items, " +
                                        $"{elementInfos.Count} element info entries, " +
-                                       $"{wallLayerRelationGroups.Count} wall relation groups " +
+                                       $"{wallLayerRelationGroups.Count} wall relation groups, " +
+                                       $"{productsWithEngineCuts.Count} engine-cut products " +
                                        $"collected in {sw.ElapsedMilliseconds} ms");
                     Report($"Decoding geometry ({rawItems.Count} shapes)…");
 
@@ -352,7 +384,8 @@ namespace IfcViewer.Ifc
                     int mergedWallLayersByRelations = CollapseWallLayersByRelationGroups(
                         buckets,
                         elementInfos,
-                        wallLayerRelationGroups);
+                        wallLayerRelationGroups,
+                        productsWithEngineCuts);
                     int mergedWallLayersByGeometry = CollapseWallLayersIntoCombinedWalls(
                         buckets,
                         elementInfos);
@@ -364,7 +397,8 @@ namespace IfcViewer.Ifc
                         openingVolumes,
                         layerBounds);
                     int cutWallCount = ApplyOpeningVolumesToLayers(
-                        buckets, elementInfos, layeredOpeningVolumes);
+                        buckets, elementInfos, layeredOpeningVolumes,
+                        wallLayerRelationGroups);
 
                     int elementCount = buckets.Count;
                     sw.Stop();
@@ -378,6 +412,9 @@ namespace IfcViewer.Ifc
                         $"shapes={shapeCount} elements={elementCount}");
 
                     Report($"Building viewport scene ({elementCount} elements)…");
+
+                    // Persist processed geometry so subsequent opens use the fast path.
+                    TrySaveCacheAsync(filePath, buckets, elementInfos);
 
                     // ── Build Helix scene objects on the UI thread ───────────
                     return BuildSceneProgressive(filePath, buckets, elementInfos,
@@ -475,6 +512,266 @@ namespace IfcViewer.Ifc
             return new IfcModel(filePath, sceneGroup, bounds, elementCount, triCount, elementMap);
         }
 
+        // ── Processed geometry cache ──────────────────────────────────────────
+        //
+        // After a full IFC load (tessellate + wall-layer merge + opening cuts),
+        // the final per-element geometry and element-info tables are written to a
+        // compact binary file in %LocalAppData%.  Subsequent opens of the same
+        // file skip all xBIM work and read the binary data directly.
+        //
+        // Cache invalidation: the file name encodes a FNV-1a hash of the IFC path
+        // plus the file's last-write ticks.  A changed file → different ticks →
+        // different name → automatic miss.  Bumping CacheFormatVersion forces a
+        // rebuild of all caches regardless of timestamps.
+        // ─────────────────────────────────────────────────────────────────────
+        private const int CacheFormatVersion = 7;
+        private static readonly byte[] CacheMagic
+            = System.Text.Encoding.ASCII.GetBytes("IFCVC");
+
+        private static string GetCacheDir()
+        {
+            string dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "RKTools", "IfcViewer", "Cache");
+            Directory.CreateDirectory(dir);
+            return dir;
+        }
+
+        /// <summary>
+        /// FNV-1a 32-bit hash of the normalised IFC file path.
+        /// Stable across processes (no framework randomisation).
+        /// </summary>
+        private static uint ComputePathHash(string ifcFilePath)
+        {
+            string normalised = Path.GetFullPath(ifcFilePath).ToLowerInvariant();
+            uint h = 2166136261u;
+            foreach (char c in normalised) { h ^= (byte)c; h *= 16777619u; }
+            return h;
+        }
+
+        /// <summary>
+        /// Returns the full path of the binary cache file for the given IFC file.
+        /// The name encodes a FNV-1a hash of the normalised source path plus the
+        /// file's last-write ticks, so it changes automatically when the file is
+        /// updated.
+        /// </summary>
+        private static string GetCachePath(string ifcFilePath)
+        {
+            uint h     = ComputePathHash(ifcFilePath);
+            long ticks = File.GetLastWriteTimeUtc(ifcFilePath).Ticks;
+            return Path.Combine(GetCacheDir(), $"{h:X8}_{ticks:X16}.ifcvcache");
+        }
+
+        /// <summary>
+        /// Deletes all cached versions of the given IFC file from the cache
+        /// directory.  Call this before a forced reload so the next
+        /// <see cref="LoadAsync"/> call performs a full rebuild.
+        /// </summary>
+        public static void InvalidateCache(string ifcFilePath)
+        {
+            try
+            {
+                uint   h      = ComputePathHash(ifcFilePath);
+                string prefix = $"{h:X8}_";
+                string dir    = GetCacheDir();
+                foreach (string f in Directory.GetFiles(dir, prefix + "*.ifcvcache"))
+                {
+                    try { File.Delete(f); }
+                    catch { /* best-effort */ }
+                }
+            }
+            catch { /* best-effort */ }
+        }
+
+        /// <summary>
+        /// Attempts to read processed geometry and element infos from the binary
+        /// cache.  Returns false on any miss, version mismatch, or read error.
+        /// </summary>
+        private static bool TryLoadCache(
+            string ifcFilePath,
+            out Dictionary<int, Bucket> buckets,
+            out Dictionary<int, IfcElementInfo> elementInfos)
+        {
+            buckets      = null;
+            elementInfos = null;
+            try
+            {
+                string path = GetCachePath(ifcFilePath);
+                if (!File.Exists(path)) return false;
+
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                using (var br = new BinaryReader(fs, System.Text.Encoding.UTF8))
+                {
+                    // Validate magic + version
+                    byte[] magic = br.ReadBytes(5);
+                    for (int i = 0; i < 5; i++)
+                        if (magic[i] != CacheMagic[i]) return false;
+                    if (br.ReadInt32() != CacheFormatVersion) return false;
+
+                    // ── Geometry ────────────────────────────────────────────
+                    int elementCount = br.ReadInt32();
+                    buckets = new Dictionary<int, Bucket>(elementCount);
+
+                    for (int e = 0; e < elementCount; e++)
+                    {
+                        int   label       = br.ReadInt32();
+                        float r = br.ReadSingle(), g = br.ReadSingle(),
+                              b = br.ReadSingle(), a = br.ReadSingle();
+                        bool  transparent = br.ReadBoolean();
+
+                        var bucket = new Bucket(transparent, new ColourKey(r, g, b, a));
+
+                        int posCount = br.ReadInt32();
+                        bucket.Positions.Capacity = posCount;
+                        bucket.Normals.Capacity   = posCount;
+                        for (int i = 0; i < posCount; i++)
+                            bucket.Positions.Add(new Vector3(
+                                br.ReadSingle(), br.ReadSingle(), br.ReadSingle()));
+                        for (int i = 0; i < posCount; i++)
+                            bucket.Normals.Add(new Vector3(
+                                br.ReadSingle(), br.ReadSingle(), br.ReadSingle()));
+
+                        int idxCount = br.ReadInt32();
+                        bucket.Indices.Capacity = idxCount;
+                        for (int i = 0; i < idxCount; i++)
+                            bucket.Indices.Add(br.ReadInt32());
+
+                        buckets[label] = bucket;
+                    }
+
+                    // ── Element infos ────────────────────────────────────────
+                    int infoCount = br.ReadInt32();
+                    elementInfos = new Dictionary<int, IfcElementInfo>(infoCount);
+
+                    for (int e = 0; e < infoCount; e++)
+                    {
+                        int label = br.ReadInt32();
+                        var info  = new IfcElementInfo
+                        {
+                            Name     = br.ReadString(),
+                            Type     = br.ReadString(),
+                            GlobalId = br.ReadString(),
+                        };
+
+                        int psetCount = br.ReadInt32();
+                        for (int p = 0; p < psetCount; p++)
+                        {
+                            string psetName  = br.ReadString();
+                            int    propCount = br.ReadInt32();
+                            var    props     = new Dictionary<string, string>(propCount);
+                            for (int i = 0; i < propCount; i++)
+                                props[br.ReadString()] = br.ReadString();
+                            info.PropertySets[psetName] = props;
+                        }
+                        elementInfos[label] = info;
+                    }
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                SessionLogger.Warn($"IfcLoader: cache read failed ({ex.Message}) — rebuilding.");
+                buckets      = null;
+                elementInfos = null;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Serialises processed geometry and element infos to the binary cache
+        /// file on a background thread.  Before writing, any stale cache files
+        /// that share the same path-hash prefix are deleted.
+        /// </summary>
+        private static void TrySaveCacheAsync(
+            string ifcFilePath,
+            Dictionary<int, Bucket> buckets,
+            Dictionary<int, IfcElementInfo> elementInfos)
+        {
+            // Compute target path on the caller thread (cheap + avoids race with
+            // the IFC file being modified before the background thread runs).
+            string targetPath = GetCachePath(ifcFilePath);
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    string cacheDir   = GetCacheDir();
+                    string hashPrefix = Path.GetFileName(targetPath).Substring(0, 8);
+
+                    // Remove stale entries for this source file before writing.
+                    foreach (string old in Directory.GetFiles(
+                        cacheDir, $"{hashPrefix}_*.ifcvcache"))
+                    {
+                        if (!string.Equals(old, targetPath,
+                                StringComparison.OrdinalIgnoreCase))
+                            File.Delete(old);
+                    }
+
+                    using (var fs = new FileStream(
+                        targetPath, FileMode.Create,
+                        FileAccess.Write, FileShare.None))
+                    using (var bw = new BinaryWriter(fs, System.Text.Encoding.UTF8))
+                    {
+                        bw.Write(CacheMagic);
+                        bw.Write(CacheFormatVersion);
+
+                        // ── Geometry ────────────────────────────────────────
+                        bw.Write(buckets.Count);
+                        foreach (var kv in buckets)
+                        {
+                            bw.Write(kv.Key);
+                            Color4 c = kv.Value.Colour.ToColor4();
+                            bw.Write(c.Red); bw.Write(c.Green);
+                            bw.Write(c.Blue); bw.Write(c.Alpha);
+                            bw.Write(kv.Value.IsTransparent);
+
+                            bw.Write(kv.Value.Positions.Count);
+                            foreach (var p in kv.Value.Positions)
+                            { bw.Write(p.X); bw.Write(p.Y); bw.Write(p.Z); }
+                            foreach (var n in kv.Value.Normals)
+                            { bw.Write(n.X); bw.Write(n.Y); bw.Write(n.Z); }
+
+                            bw.Write(kv.Value.Indices.Count);
+                            foreach (int idx in kv.Value.Indices)
+                                bw.Write(idx);
+                        }
+
+                        // ── Element infos ─────────────────────────────────
+                        bw.Write(elementInfos.Count);
+                        foreach (var kv in elementInfos)
+                        {
+                            bw.Write(kv.Key);
+                            bw.Write(kv.Value.Name     ?? "");
+                            bw.Write(kv.Value.Type     ?? "");
+                            bw.Write(kv.Value.GlobalId ?? "");
+
+                            bw.Write(kv.Value.PropertySets.Count);
+                            foreach (var pset in kv.Value.PropertySets)
+                            {
+                                bw.Write(pset.Key);
+                                bw.Write(pset.Value.Count);
+                                foreach (var prop in pset.Value)
+                                {
+                                    bw.Write(prop.Key);
+                                    bw.Write(prop.Value ?? "");
+                                }
+                            }
+                        }
+
+                        long sizeKb = fs.Length / 1024;
+                        SessionLogger.Info(
+                            $"IfcLoader: cache saved ({sizeKb} KB) → " +
+                            $"{Path.GetFileName(targetPath)}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    SessionLogger.Warn($"IfcLoader: cache write failed: {ex.Message}");
+                }
+            });
+        }
+
         // ── Element property extraction ──────────────────────────────────────
 
         /// <summary>
@@ -521,11 +818,11 @@ namespace IfcViewer.Ifc
         private static bool ShouldSkip(
             XbimShapeInstance instance,
             IPersistEntity entity,
-            Dictionary<int, int> representationMaskByProduct)
+            HashSet<int> productsWithIncludedGeom)
         {
             try
             {
-                if (ShouldSkipByRepresentation(instance, representationMaskByProduct))
+                if (ShouldSkipByRepresentation(instance, productsWithIncludedGeom))
                     return true;
 
                 return IsIgnoredEntity(entity);
@@ -535,25 +832,19 @@ namespace IfcViewer.Ifc
 
         private static bool ShouldSkipByRepresentation(
             XbimShapeInstance instance,
-            Dictionary<int, int> representationMaskByProduct)
+            HashSet<int> productsWithIncludedGeom)
         {
-            int currentMask = (int)instance.RepresentationType;
-            if (currentMask == 0) return false;
-
-            int included = (int)XbimGeometryRepresentationType.OpeningsAndAdditionsIncluded;
-            int excluded = (int)XbimGeometryRepresentationType.OpeningsAndAdditionsExcluded;
-            int only = (int)XbimGeometryRepresentationType.OpeningsAndAdditionsOnly;
+            var repType = instance.RepresentationType;
 
             // "Only" geometry is just feature solids (voids/additions), not product body.
-            if ((currentMask & only) != 0)
+            if (repType == XbimGeometryRepresentationType.OpeningsAndAdditionsOnly)
                 return true;
 
-            // If "included" exists for this product, suppress the "excluded" duplicate
-            // so openings do not get filled back by a second solid.
-            if ((currentMask & excluded) != 0
-                && representationMaskByProduct != null
-                && representationMaskByProduct.TryGetValue(instance.IfcProductLabel, out int allMasks)
-                && (allMasks & included) != 0)
+            // If "Included" (engine-cut) geometry exists for this product, suppress
+            // the "Excluded" (uncut) duplicate so openings stay visible.
+            if (repType == XbimGeometryRepresentationType.OpeningsAndAdditionsExcluded
+                && productsWithIncludedGeom != null
+                && productsWithIncludedGeom.Contains(instance.IfcProductLabel))
                 return true;
 
             return false;
@@ -618,6 +909,58 @@ namespace IfcViewer.Ifc
             }
 
             return groups;
+        }
+
+        /// <summary>
+        /// Builds a map from opening element labels to the set of host product
+        /// labels they void.  For decomposed walls, the opening's host set
+        /// includes both the host wall and its child layer parts.
+        /// This enables targeted AABB fallback cuts (only cut the walls that
+        /// actually have an opening, not all nearby walls).
+        /// </summary>
+        private static Dictionary<int, HashSet<int>> BuildVoidRelationMap(
+            IModel model,
+            Dictionary<int, HashSet<int>> wallLayerRelationGroups)
+        {
+            var map = new Dictionary<int, HashSet<int>>();
+            if (model == null) return map;
+
+            try
+            {
+                foreach (IIfcRelVoidsElement rel in model.Instances.OfType<IIfcRelVoidsElement>())
+                {
+                    if (rel?.RelatingBuildingElement == null
+                        || rel.RelatedOpeningElement == null)
+                        continue;
+
+                    int openingLabel = (rel.RelatedOpeningElement as IPersistEntity)?.EntityLabel ?? 0;
+                    int hostLabel    = (rel.RelatingBuildingElement as IPersistEntity)?.EntityLabel ?? 0;
+                    if (openingLabel <= 0 || hostLabel <= 0) continue;
+
+                    if (!map.TryGetValue(openingLabel, out HashSet<int> hosts))
+                    {
+                        hosts = new HashSet<int>();
+                        map[openingLabel] = hosts;
+                    }
+
+                    hosts.Add(hostLabel);
+
+                    // Also add all decomposed children of the host wall — the
+                    // opening should cut through layer parts as well.
+                    if (wallLayerRelationGroups != null
+                        && wallLayerRelationGroups.TryGetValue(hostLabel, out HashSet<int> children))
+                    {
+                        foreach (int child in children)
+                            hosts.Add(child);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                SessionLogger.Warn($"IfcLoader: IfcRelVoidsElement scan failed: {ex.Message}");
+            }
+
+            return map;
         }
 
         private static void RegisterWallLayerRelation(
@@ -727,7 +1070,8 @@ namespace IfcViewer.Ifc
         private static int CollapseWallLayersByRelationGroups(
             Dictionary<int, Bucket> buckets,
             Dictionary<int, IfcElementInfo> elementInfos,
-            Dictionary<int, HashSet<int>> wallLayerGroups)
+            Dictionary<int, HashSet<int>> wallLayerGroups,
+            HashSet<int> productsWithEngineCuts)
         {
             if (buckets == null || buckets.Count == 0) return 0;
             if (wallLayerGroups == null || wallLayerGroups.Count == 0) return 0;
@@ -739,15 +1083,56 @@ namespace IfcViewer.Ifc
                 HashSet<int> childLabels = kv.Value;
                 if (childLabels == null || childLabels.Count == 0) continue;
 
-                var groupLabels = new List<int>();
-                if (buckets.ContainsKey(hostLabel))
-                    groupLabels.Add(hostLabel);
+                // When the host wall has engine-cut geometry (both "Included"
+                // AND "Excluded" representations), discard the layer parts —
+                // the host already carries correct boolean cuts from the
+                // XbimGeometryEngine and merging uncut layers would fill openings.
+                if (productsWithEngineCuts != null
+                    && productsWithEngineCuts.Contains(hostLabel)
+                    && buckets.ContainsKey(hostLabel))
+                {
+                    foreach (int childLabel in childLabels)
+                    {
+                        if (!buckets.ContainsKey(childLabel)) continue;
+                        buckets.Remove(childLabel);
+                        elementInfos.Remove(childLabel);
+                        mergedCount++;
+                    }
+                    continue;
+                }
 
+                // Fallback: host has no engine-cut geometry — merge layers
+                // together so the AABB opening cutter can process the combined shape.
+                //
+                // xBIM produces geometry for BOTH the host wall AND the individual
+                // layer parts (IfcBuildingElementPart).  These overlap — the host is
+                // the full wall body, the children are individual layers that together
+                // form the same shape.  To avoid doubled/overlapping geometry:
+                //   - If children have geometry, discard the host body (children are
+                //     the detailed decomposition and may carry individual engine cuts).
+                //   - Merge the children into a single bucket for AABB opening fallback.
+                var childrenInBuckets = new List<int>();
                 foreach (int childLabel in childLabels)
                 {
-                    if (!buckets.ContainsKey(childLabel)) continue;
-                    groupLabels.Add(childLabel);
+                    if (buckets.ContainsKey(childLabel))
+                        childrenInBuckets.Add(childLabel);
                 }
+
+                bool hostHasGeom = buckets.ContainsKey(hostLabel);
+
+                // When children have geometry, discard the host to avoid doubled
+                // geometry (the host body overlaps the sum of its layer parts).
+                if (childrenInBuckets.Count > 0 && hostHasGeom)
+                {
+                    buckets.Remove(hostLabel);
+                    // Keep hostInfo in elementInfos — it will be copied to primary below.
+                    mergedCount++;
+                }
+
+                var groupLabels = new List<int>(childrenInBuckets);
+                // Only include host if it still has geometry (children were absent).
+                if (buckets.ContainsKey(hostLabel))
+                    groupLabels.Add(hostLabel);
 
                 if (groupLabels.Count < 2) continue;
 
@@ -766,6 +1151,8 @@ namespace IfcViewer.Ifc
                     mergedCount++;
                 }
 
+                // Carry the host wall's identity to the merged bucket so properties
+                // panel shows the wall info (not a layer part).
                 if (primaryLabel != hostLabel
                     && elementInfos.TryGetValue(hostLabel, out IfcElementInfo hostInfo)
                     && IsWallLikeType(hostInfo?.Type))
@@ -915,9 +1302,23 @@ namespace IfcViewer.Ifc
             const float minLinearOverlapRatio = 0.45f;
             const float minLinearOverlapAbs = 0.60f;
 
+            // Infer the effective horizontal run-axis for each candidate, even when
+            // DominantAxis == -1 (nearly-square plan footprint).  This ensures the
+            // perpendicular-wall guard fires regardless of which side is ambiguous,
+            // preventing diagonal corner stubs from being merged into straight walls.
+            float aXSpan = a.Bounds.Maximum.X - a.Bounds.Minimum.X;
+            float aZSpan = a.Bounds.Maximum.Z - a.Bounds.Minimum.Z;
+            float bXSpan = b.Bounds.Maximum.X - b.Bounds.Minimum.X;
+            float bZSpan = b.Bounds.Maximum.Z - b.Bounds.Minimum.Z;
+
+            int axisA = a.DominantAxis >= 0 ? a.DominantAxis : (aXSpan >= aZSpan ? 0 : 1);
+            int axisB = b.DominantAxis >= 0 ? b.DominantAxis : (bXSpan >= bZSpan ? 0 : 1);
+
             // Avoid merging perpendicular walls at junctions.
-            if (a.DominantAxis >= 0 && b.DominantAxis >= 0 && a.DominantAxis != b.DominantAxis)
+            if (axisA != axisB)
                 return false;
+
+            int axis = axisA; // both axes agree at this point
 
             float aHeight = Math.Max(0.001f, a.Bounds.Maximum.Y - a.Bounds.Minimum.Y);
             float bHeight = Math.Max(0.001f, b.Bounds.Maximum.Y - b.Bounds.Minimum.Y);
@@ -928,23 +1329,26 @@ namespace IfcViewer.Ifc
                 return false;
 
             // If exporter split one wall into layer elements with same name,
-            // allow a direct merge when they are spatially close.
+            // allow a direct merge when they are adjacent in the cross-axis direction
+            // (layers are stacked perpendicular to the wall's run direction).
+            // Only check the cross-axis gap — not both axes — to avoid merging
+            // same-named elements at building corners that happen to be near in both X and Z.
             if (!string.IsNullOrWhiteSpace(a.Name)
                 && string.Equals(a.Name, b.Name, StringComparison.OrdinalIgnoreCase))
             {
-                if (IntervalGap(
-                        a.Bounds.Minimum.X, a.Bounds.Maximum.X,
-                        b.Bounds.Minimum.X, b.Bounds.Maximum.X) <= 0.80f
-                    && IntervalGap(
-                        a.Bounds.Minimum.Z, a.Bounds.Maximum.Z,
-                        b.Bounds.Minimum.Z, b.Bounds.Maximum.Z) <= 0.80f)
+                float crossGap = axis == 0
+                    ? IntervalGap(a.Bounds.Minimum.Z, a.Bounds.Maximum.Z,
+                                  b.Bounds.Minimum.Z, b.Bounds.Maximum.Z)
+                    : IntervalGap(a.Bounds.Minimum.X, a.Bounds.Maximum.X,
+                                  b.Bounds.Minimum.X, b.Bounds.Maximum.X);
+                if (crossGap <= 0.80f)
                     return true;
             }
 
-            float aX = Math.Max(0.001f, a.Bounds.Maximum.X - a.Bounds.Minimum.X);
-            float aZ = Math.Max(0.001f, a.Bounds.Maximum.Z - a.Bounds.Minimum.Z);
-            float bX = Math.Max(0.001f, b.Bounds.Maximum.X - b.Bounds.Minimum.X);
-            float bZ = Math.Max(0.001f, b.Bounds.Maximum.Z - b.Bounds.Minimum.Z);
+            float aX = Math.Max(0.001f, aXSpan);
+            float aZ = Math.Max(0.001f, aZSpan);
+            float bX = Math.Max(0.001f, bXSpan);
+            float bZ = Math.Max(0.001f, bZSpan);
 
             float overlapX = GetIntervalOverlapSize(
                 a.Bounds.Minimum.X, a.Bounds.Maximum.X,
@@ -959,10 +1363,6 @@ namespace IfcViewer.Ifc
             float gapZ = IntervalGap(
                 a.Bounds.Minimum.Z, a.Bounds.Maximum.Z,
                 b.Bounds.Minimum.Z, b.Bounds.Maximum.Z);
-
-            int axis = a.DominantAxis >= 0 ? a.DominantAxis : b.DominantAxis;
-            if (axis < 0)
-                axis = (Math.Max(aX, bX) >= Math.Max(aZ, bZ)) ? 0 : 1;
 
             if (axis == 0)
             {
@@ -1062,11 +1462,11 @@ namespace IfcViewer.Ifc
             if (ra != rb) parent[rb] = ra;
         }
 
-        private static List<BoundingBox> BuildOpeningVolumes(
+        private static List<OpeningVolume> BuildOpeningVolumes(
             List<OpeningShapeItem> openingItems,
             float toMetres)
         {
-            var volumes = new List<BoundingBox>();
+            var volumes = new List<OpeningVolume>();
             if (openingItems == null || openingItems.Count == 0) return volumes;
 
             const float epsilon = 0.002f;           // 2 mm tolerance
@@ -1108,7 +1508,11 @@ namespace IfcViewer.Ifc
                     }
 
                     var tol = new Vector3(epsilon, epsilon, epsilon);
-                    volumes.Add(new BoundingBox(min - tol, max + tol));
+                    volumes.Add(new OpeningVolume
+                    {
+                        Bounds = new BoundingBox(min - tol, max + tol),
+                        HostProductLabels = item.HostProductLabels,
+                    });
                 }
                 catch
                 {
@@ -1139,12 +1543,12 @@ namespace IfcViewer.Ifc
             return bounds;
         }
 
-        private static List<BoundingBox> ExpandOpeningVolumesForLayers(
-            List<BoundingBox> openingVolumes,
+        private static List<OpeningVolume> ExpandOpeningVolumesForLayers(
+            List<OpeningVolume> openingVolumes,
             List<BoundingBox> layerBounds)
         {
             if (openingVolumes == null || openingVolumes.Count == 0)
-                return new List<BoundingBox>();
+                return new List<OpeningVolume>();
             if (layerBounds == null || layerBounds.Count == 0)
                 return openingVolumes;
 
@@ -1152,14 +1556,25 @@ namespace IfcViewer.Ifc
             const float maxExtraDepth = 2.00f;    // clamp extension to avoid runaway cuts
             const float planarTolerance = 0.01f;  // 10 mm
 
-            var expanded = new List<BoundingBox>(openingVolumes.Count);
+            var expanded = new List<OpeningVolume>(openingVolumes.Count);
 
-            foreach (BoundingBox opening in openingVolumes)
+            foreach (OpeningVolume ov in openingVolumes)
             {
+                BoundingBox opening = ov.Bounds;
                 Vector3 min = opening.Minimum;
                 Vector3 max = opening.Maximum;
                 Vector3 size = max - min;
                 int depthAxis = GetSmallestAxis(size);
+
+                // A slab/floor opening has Y as its thinnest axis (vertical in scene space).
+                // Expanding it along Y would stretch the cut box through the full height of
+                // adjacent vertical wall layers and corrupt them.  Skip expansion and keep
+                // the original bounding box as-is; the narrow box is harmless to walls.
+                if (depthAxis == 1)
+                {
+                    expanded.Add(ov);
+                    continue;
+                }
 
                 float startMin = GetAxis(min, depthAxis);
                 float startMax = GetAxis(max, depthAxis);
@@ -1199,7 +1614,11 @@ namespace IfcViewer.Ifc
 
                 SetAxis(ref min, depthAxis, depthMin);
                 SetAxis(ref max, depthAxis, depthMax);
-                expanded.Add(new BoundingBox(min, max));
+                expanded.Add(new OpeningVolume
+                {
+                    Bounds = new BoundingBox(min, max),
+                    HostProductLabels = ov.HostProductLabels,
+                });
             }
 
             return expanded;
@@ -1278,10 +1697,16 @@ namespace IfcViewer.Ifc
         private static int ApplyOpeningVolumesToLayers(
             Dictionary<int, Bucket> buckets,
             Dictionary<int, IfcElementInfo> elementInfos,
-            List<BoundingBox> openingVolumes)
+            List<OpeningVolume> openingVolumes,
+            Dictionary<int, HashSet<int>> wallLayerRelationGroups)
         {
             if (buckets == null || buckets.Count == 0) return 0;
             if (openingVolumes == null || openingVolumes.Count == 0) return 0;
+
+            // Pre-extract all opening bounding boxes for spatial matching.
+            var allOpeningBounds = new List<BoundingBox>(openingVolumes.Count);
+            foreach (var ov in openingVolumes)
+                allOpeningBounds.Add(ov.Bounds);
 
             int cutCount = 0;
             foreach (var kv in buckets)
@@ -1289,7 +1714,22 @@ namespace IfcViewer.Ifc
                 if (!elementInfos.TryGetValue(kv.Key, out IfcElementInfo info)) continue;
                 if (!ShouldApplyLayeredCut(info?.Type)) continue;
 
-                if (ApplyOpeningCutsToBucket(kv.Value, openingVolumes))
+                // Use spatial proximity: apply every opening whose AABB overlaps
+                // this bucket's bounds.  Label-based targeting is unreliable after
+                // wall-layer merging shuffles bucket keys.  The downstream centroid-
+                // inside-shrunk-opening test prevents false-positive cuts on adjacent
+                // walls at T-junctions and corners.
+                BoundingBox bucketBounds = GetBounds(kv.Value.Positions);
+                var relevant = new List<BoundingBox>();
+                foreach (BoundingBox ob in allOpeningBounds)
+                {
+                    if (Intersects(bucketBounds, ob))
+                        relevant.Add(ob);
+                }
+
+                if (relevant.Count == 0) continue;
+
+                if (ApplyOpeningCutsToBucket(kv.Value, relevant))
                     cutCount++;
             }
 
@@ -1304,6 +1744,13 @@ namespace IfcViewer.Ifc
             return string.Equals(ifcType, "IfcCovering", StringComparison.OrdinalIgnoreCase);
         }
 
+        /// <summary>
+        /// Cuts opening volumes from a wall bucket by splitting triangles along the
+        /// exact AABB face planes of each opening.  Triangles that cross an opening
+        /// boundary are split into sub-triangles whose edges lie exactly on the box
+        /// faces, producing clean straight edges.  Sub-triangles whose centroids fall
+        /// inside the (slightly shrunk) opening are discarded.
+        /// </summary>
         private static bool ApplyOpeningCutsToBucket(Bucket bucket, List<BoundingBox> openingVolumes)
         {
             if (bucket == null || bucket.Indices.Count < 3 || bucket.Positions.Count == 0)
@@ -1313,70 +1760,259 @@ namespace IfcViewer.Ifc
             var candidates = openingVolumes.Where(v => Intersects(bucketBounds, v)).ToList();
             if (candidates.Count == 0) return false;
 
-            bool removed = false;
-            var kept = new List<int>(bucket.Indices.Count);
+            // Shrink opening volumes 2 mm inward for the centroid inside/outside
+            // test — protects edge triangles on geometry the engine already cut.
+            const float edgeTolerance = 0.002f;
+            var shrunkCandidates = new List<BoundingBox>(candidates.Count);
+            foreach (var box in candidates)
+            {
+                var tol = new Vector3(edgeTolerance, edgeTolerance, edgeTolerance);
+                shrunkCandidates.Add(new BoundingBox(
+                    box.Minimum + tol, box.Maximum - tol));
+            }
 
+            // Extract all triangles from the bucket.
+            var triangles = new List<SubTri>();
             for (int i = 0; i + 2 < bucket.Indices.Count; i += 3)
             {
                 int i0 = bucket.Indices[i];
                 int i1 = bucket.Indices[i + 1];
                 int i2 = bucket.Indices[i + 2];
-
                 if (i0 < 0 || i1 < 0 || i2 < 0
                     || i0 >= bucket.Positions.Count
                     || i1 >= bucket.Positions.Count
                     || i2 >= bucket.Positions.Count)
                     continue;
-
-                Vector3 p0 = bucket.Positions[i0];
-                Vector3 p1 = bucket.Positions[i1];
-                Vector3 p2 = bucket.Positions[i2];
-
-                if (ShouldCullTriangle(p0, p1, p2, candidates))
+                triangles.Add(new SubTri
                 {
-                    removed = true;
-                    continue;
-                }
-
-                kept.Add(i0);
-                kept.Add(i1);
-                kept.Add(i2);
+                    P0 = bucket.Positions[i0], P1 = bucket.Positions[i1], P2 = bucket.Positions[i2],
+                    N0 = bucket.Normals[i0],   N1 = bucket.Normals[i1],   N2 = bucket.Normals[i2],
+                });
             }
 
-            if (!removed) return false;
+            bool modified = false;
 
+            // For each opening, split intersecting triangles along the opening's
+            // 6 AABB face planes and discard pieces whose centroids are inside.
+            for (int ci = 0; ci < candidates.Count; ci++)
+            {
+                BoundingBox box  = candidates[ci];
+                BoundingBox test = shrunkCandidates[ci];
+                var next = new List<SubTri>(triangles.Count);
+
+                foreach (SubTri tri in triangles)
+                {
+                    if (!TriIntersectsBox(tri, box))
+                    {
+                        next.Add(tri);
+                        continue;
+                    }
+
+                    // Split the triangle against all 6 face planes of the AABB.
+                    var pieces = SplitTriAgainstAABB(tri, box);
+
+                    // Collect kept pieces and check if any were discarded.
+                    var kept = new List<SubTri>(pieces.Count);
+                    bool anyDiscarded = false;
+                    foreach (SubTri piece in pieces)
+                    {
+                        Vector3 centroid = (piece.P0 + piece.P1 + piece.P2) / 3f;
+                        if (Contains(test, centroid))
+                            anyDiscarded = true;
+                        else
+                            kept.Add(piece);
+                    }
+
+                    if (anyDiscarded)
+                    {
+                        // Real cut — keep the split pieces.
+                        modified = true;
+                        next.AddRange(kept);
+                    }
+                    else
+                    {
+                        // No pieces discarded — split was useless, keep original.
+                        next.Add(tri);
+                    }
+                }
+
+                triangles = next;
+            }
+
+            if (!modified) return false;
+
+            // Rebuild bucket from surviving triangles.
+            bucket.Positions.Clear();
+            bucket.Normals.Clear();
             bucket.Indices.Clear();
-            bucket.Indices.AddRange(kept);
+
+            foreach (SubTri tri in triangles)
+            {
+                int baseIdx = bucket.Positions.Count;
+                bucket.Positions.Add(tri.P0);
+                bucket.Positions.Add(tri.P1);
+                bucket.Positions.Add(tri.P2);
+                bucket.Normals.Add(tri.N0);
+                bucket.Normals.Add(tri.N1);
+                bucket.Normals.Add(tri.N2);
+                bucket.Indices.Add(baseIdx);
+                bucket.Indices.Add(baseIdx + 1);
+                bucket.Indices.Add(baseIdx + 2);
+            }
+
             return true;
         }
 
-        private static bool ShouldCullTriangle(
-            Vector3 p0,
-            Vector3 p1,
-            Vector3 p2,
-            List<BoundingBox> candidates)
-        {
-            Vector3 triMin = new Vector3(
-                Math.Min(p0.X, Math.Min(p1.X, p2.X)),
-                Math.Min(p0.Y, Math.Min(p1.Y, p2.Y)),
-                Math.Min(p0.Z, Math.Min(p1.Z, p2.Z)));
-            Vector3 triMax = new Vector3(
-                Math.Max(p0.X, Math.Max(p1.X, p2.X)),
-                Math.Max(p0.Y, Math.Max(p1.Y, p2.Y)),
-                Math.Max(p0.Z, Math.Max(p1.Z, p2.Z)));
-            Vector3 center = (p0 + p1 + p2) / 3f;
+        // ── Triangle-AABB plane splitting ────────────────────────────────────
+        //
+        // Splits triangles along the exact face planes of an AABB so that the
+        // resulting sub-triangle edges align perfectly with the box boundaries.
+        // This produces clean straight edges at opening cuts, regardless of how
+        // coarsely the original wall mesh was tessellated.
 
-            foreach (BoundingBox box in candidates)
+        private struct SubTri
+        {
+            public Vector3 P0, P1, P2;
+            public Vector3 N0, N1, N2;
+        }
+
+        private static bool TriIntersectsBox(SubTri tri, BoundingBox box)
+        {
+            float minX = Math.Min(tri.P0.X, Math.Min(tri.P1.X, tri.P2.X));
+            float minY = Math.Min(tri.P0.Y, Math.Min(tri.P1.Y, tri.P2.Y));
+            float minZ = Math.Min(tri.P0.Z, Math.Min(tri.P1.Z, tri.P2.Z));
+            float maxX = Math.Max(tri.P0.X, Math.Max(tri.P1.X, tri.P2.X));
+            float maxY = Math.Max(tri.P0.Y, Math.Max(tri.P1.Y, tri.P2.Y));
+            float maxZ = Math.Max(tri.P0.Z, Math.Max(tri.P1.Z, tri.P2.Z));
+            return !(maxX < box.Minimum.X || minX > box.Maximum.X
+                  || maxY < box.Minimum.Y || minY > box.Maximum.Y
+                  || maxZ < box.Minimum.Z || minZ > box.Maximum.Z);
+        }
+
+        /// <summary>
+        /// Splits a triangle against all 6 face planes of an AABB.
+        /// Returns sub-triangles whose edges align with the box faces.
+        /// </summary>
+        private static List<SubTri> SplitTriAgainstAABB(SubTri tri, BoundingBox box)
+        {
+            var current = new List<SubTri>(8) { tri };
+
+            // Split against each axis-aligned face plane (6 planes total).
+            for (int axis = 0; axis < 3; axis++)
             {
-                if (!Intersects(triMin, triMax, box)) continue;
-                if (Contains(box, center)
-                    || Contains(box, p0)
-                    || Contains(box, p1)
-                    || Contains(box, p2))
-                    return true;
+                float minVal = (axis == 0) ? box.Minimum.X
+                             : (axis == 1) ? box.Minimum.Y
+                             : box.Minimum.Z;
+                float maxVal = (axis == 0) ? box.Maximum.X
+                             : (axis == 1) ? box.Maximum.Y
+                             : box.Maximum.Z;
+
+                current = SplitListByPlane(current, axis, minVal);
+                current = SplitListByPlane(current, axis, maxVal);
             }
 
-            return false;
+            return current;
+        }
+
+        private static List<SubTri> SplitListByPlane(List<SubTri> tris, int axis, float splitValue)
+        {
+            var result = new List<SubTri>(tris.Count + 4);
+            foreach (SubTri tri in tris)
+                SplitOneTriByPlane(tri, axis, splitValue, result);
+            return result;
+        }
+
+        /// <summary>
+        /// Splits one triangle by an axis-aligned plane at <paramref name="splitValue"/>.
+        /// Produces 1 triangle (no split needed) or 3 triangles (one vertex isolated
+        /// on one side → 1 triangle on that side + quad on the other side split into 2).
+        /// New vertices are created by linear interpolation along the crossing edges,
+        /// ensuring edges align exactly with the plane.
+        /// </summary>
+        private static void SplitOneTriByPlane(SubTri tri, int axis, float splitValue,
+                                                List<SubTri> result)
+        {
+            const float eps = 0.0005f; // 0.5 mm snap tolerance
+
+            float d0 = AxisOf(tri.P0, axis) - splitValue;
+            float d1 = AxisOf(tri.P1, axis) - splitValue;
+            float d2 = AxisOf(tri.P2, axis) - splitValue;
+
+            // Snap near-zero distances to zero to avoid degenerate slivers.
+            if (Math.Abs(d0) < eps) d0 = 0f;
+            if (Math.Abs(d1) < eps) d1 = 0f;
+            if (Math.Abs(d2) < eps) d2 = 0f;
+
+            int s0 = Math.Sign(d0);
+            int s1 = Math.Sign(d1);
+            int s2 = Math.Sign(d2);
+
+            // All vertices on one side (or on the plane) → no split.
+            if (s0 >= 0 && s1 >= 0 && s2 >= 0) { result.Add(tri); return; }
+            if (s0 <= 0 && s1 <= 0 && s2 <= 0) { result.Add(tri); return; }
+
+            // Find the isolated vertex (on the opposite side from the other two).
+            // Reorder: A = isolated, B and C = same side.
+            Vector3 pA, pB, pC, nA, nB, nC;
+            float dA, dB, dC;
+
+            if ((s0 > 0 && s1 <= 0 && s2 <= 0) || (s0 < 0 && s1 >= 0 && s2 >= 0))
+            {
+                pA = tri.P0; pB = tri.P1; pC = tri.P2;
+                nA = tri.N0; nB = tri.N1; nC = tri.N2;
+                dA = d0; dB = d1; dC = d2;
+            }
+            else if ((s1 > 0 && s0 <= 0 && s2 <= 0) || (s1 < 0 && s0 >= 0 && s2 >= 0))
+            {
+                pA = tri.P1; pB = tri.P0; pC = tri.P2;
+                nA = tri.N1; nB = tri.N0; nC = tri.N2;
+                dA = d1; dB = d0; dC = d2;
+            }
+            else
+            {
+                pA = tri.P2; pB = tri.P0; pC = tri.P1;
+                nA = tri.N2; nB = tri.N0; nC = tri.N1;
+                dA = d2; dB = d0; dC = d1;
+            }
+
+            // Intersection of edges A→B and A→C with the plane.
+            float tAB = dA / (dA - dB);
+            float tAC = dA / (dA - dC);
+            tAB = Math.Max(0f, Math.Min(1f, tAB));
+            tAC = Math.Max(0f, Math.Min(1f, tAC));
+
+            Vector3 pAB = LerpV(pA, pB, tAB);
+            Vector3 pAC = LerpV(pA, pC, tAC);
+            Vector3 nAB = SafeNormalize(LerpV(nA, nB, tAB));
+            Vector3 nAC = SafeNormalize(LerpV(nA, nC, tAC));
+
+            // Triangle on A's side: A → AB → AC
+            result.Add(new SubTri { P0 = pA, P1 = pAB, P2 = pAC, N0 = nA, N1 = nAB, N2 = nAC });
+
+            // Quad on B/C's side: AB → B → C → AC → split into 2 triangles.
+            result.Add(new SubTri { P0 = pAB, P1 = pB, P2 = pC, N0 = nAB, N1 = nB, N2 = nC });
+            result.Add(new SubTri { P0 = pAB, P1 = pC, P2 = pAC, N0 = nAB, N1 = nC, N2 = nAC });
+        }
+
+        private static float AxisOf(Vector3 v, int axis)
+        {
+            if (axis == 0) return v.X;
+            if (axis == 1) return v.Y;
+            return v.Z;
+        }
+
+        private static Vector3 LerpV(Vector3 a, Vector3 b, float t)
+        {
+            return new Vector3(
+                a.X + (b.X - a.X) * t,
+                a.Y + (b.Y - a.Y) * t,
+                a.Z + (b.Z - a.Z) * t);
+        }
+
+        private static Vector3 SafeNormalize(Vector3 v)
+        {
+            float len = v.Length();
+            return len > 1e-8f ? v / len : v;
         }
 
         private static BoundingBox GetBounds(List<Vector3> points)
@@ -1424,48 +2060,26 @@ namespace IfcViewer.Ifc
                                                 IModel model,
                                                 XbimColourMap colourMap)
         {
+            // StyleLabel > 0: direct surface style on the shape representation item.
+            // StyleLabel == 0: no style assigned by xBIM engine's IIfcStyledItem scan.
+            //   → try material-level style (IfcRelAssociatesMaterial → IfcMaterialDefinitionRepresentation)
+            //   → fall through to type-based fallback.
             if (instance.StyleLabel > 0)
             {
-                try
-                {
-                    IPersistEntity styleEntity = model.Instances[instance.StyleLabel];
-                    if (styleEntity is Xbim.Ifc4.Interfaces.IIfcSurfaceStyle ss)
-                    {
-                        foreach (var item in ss.Styles)
-                        {
-                            if (item is Xbim.Ifc4.Interfaces.IIfcSurfaceStyleShading shading)
-                            {
-                                var col   = shading.SurfaceColour;
-                                float alpha = 1f - (float)(shading.Transparency ?? 0);
-                                return new XbimColour("s",
-                                    (float)col.Red, (float)col.Green, (float)col.Blue, alpha);
-                            }
-                        }
-                    }
-                    if (styleEntity is Xbim.Ifc2x3.PresentationAppearanceResource.IfcSurfaceStyle ss2x3)
-                    {
-                        foreach (var item in ss2x3.Styles)
-                        {
-                            if (item is Xbim.Ifc2x3.PresentationAppearanceResource.IfcSurfaceStyleRendering rend)
-                            {
-                                var col   = rend.SurfaceColour;
-                                float alpha = rend.Transparency.HasValue
-                                    ? 1f - (float)rend.Transparency.Value : 1f;
-                                return new XbimColour("s",
-                                    (float)col.Red, (float)col.Green, (float)col.Blue, alpha);
-                            }
-                        }
-                    }
-                }
-                catch { /* fall through */ }
+                var colour = ExtractColourFromSurfaceStyle(model, instance.StyleLabel);
+                if (colour != null) return colour;
             }
 
+            // Try material-based style when no direct style exists.
             try
             {
                 IPersistEntity entity = model.Instances[instance.IfcProductLabel];
-                if (entity != null)
+                if (entity is IIfcProduct product)
                 {
-                    string typeName = entity.ExpressType.Name;
+                    var materialColour = ResolveMaterialColour(product, model);
+                    if (materialColour != null) return materialColour;
+
+                    string typeName = product.ExpressType.Name;
                     if (colourMap.Contains(typeName)) return colourMap[typeName];
                     return GetFallbackColour(typeName);
                 }
@@ -1473,6 +2087,169 @@ namespace IfcViewer.Ifc
             catch { /* fall through */ }
 
             return ColDefault;
+        }
+
+        /// <summary>
+        /// Extracts colour from an IfcSurfaceStyle entity by label.
+        /// Handles both IFC2x3 and IFC4 through the unified interface layer.
+        /// Prefers DiffuseColour (when it's an explicit IIfcColourRgb) over SurfaceColour.
+        /// </summary>
+        private static XbimColour ExtractColourFromSurfaceStyle(IModel model, int styleLabel)
+        {
+            try
+            {
+                IPersistEntity styleEntity = model.Instances[styleLabel];
+                if (!(styleEntity is IIfcSurfaceStyle ss)) return null;
+
+                foreach (var item in ss.Styles)
+                {
+                    if (!(item is IIfcSurfaceStyleShading shading)) continue;
+
+                    float alpha = 1f - (float)(shading.Transparency ?? 0);
+
+                    // Prefer explicit DiffuseColour (IIfcColourRgb) when present —
+                    // it is the author-intended render colour.  SurfaceColour is
+                    // the base reflectance that DiffuseColour overrides.
+                    if (shading is IIfcSurfaceStyleRendering rendering
+                        && rendering.DiffuseColour is IIfcColourRgb diffuseRgb)
+                    {
+                        return new XbimColour("s",
+                            (float)diffuseRgb.Red, (float)diffuseRgb.Green,
+                            (float)diffuseRgb.Blue, alpha);
+                    }
+
+                    var col = shading.SurfaceColour;
+                    return new XbimColour("s",
+                        (float)col.Red, (float)col.Green, (float)col.Blue, alpha);
+                }
+            }
+            catch { /* fall through */ }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Resolves colour from the product's associated material when no direct
+        /// surface style exists (StyleLabel == 0).  Traverses:
+        ///   IIfcProduct → IIfcRelAssociatesMaterial → material
+        ///   → IIfcMaterialDefinitionRepresentation → IIfcStyledRepresentation
+        ///   → IIfcStyledItem → IIfcSurfaceStyle
+        /// Also checks individual material layers for layered materials.
+        /// </summary>
+        private static XbimColour ResolveMaterialColour(IIfcProduct product, IModel model)
+        {
+            try
+            {
+                foreach (var rel in product.HasAssociations)
+                {
+                    if (!(rel is IIfcRelAssociatesMaterial matRel)) continue;
+                    var material = matRel.RelatingMaterial;
+                    if (material == null) continue;
+
+                    // Direct material with representation
+                    if (material is IIfcMaterial singleMat)
+                    {
+                        var c = ExtractColourFromMaterial(singleMat, model);
+                        if (c != null) return c;
+                    }
+
+                    // Material layer set usage → layer set → individual layers
+                    if (material is IIfcMaterialLayerSetUsage usage)
+                    {
+                        var c = ExtractColourFromLayerSet(usage.ForLayerSet, model);
+                        if (c != null) return c;
+                    }
+
+                    // Direct material layer set
+                    if (material is IIfcMaterialLayerSet layerSet)
+                    {
+                        var c = ExtractColourFromLayerSet(layerSet, model);
+                        if (c != null) return c;
+                    }
+
+                    // Material constituent set
+                    if (material is IIfcMaterialConstituentSet constituentSet)
+                    {
+                        foreach (var constituent in constituentSet.MaterialConstituents)
+                        {
+                            if (constituent?.Material == null) continue;
+                            var c = ExtractColourFromMaterial(constituent.Material, model);
+                            if (c != null) return c;
+                        }
+                    }
+
+                    // Material profile set
+                    if (material is IIfcMaterialProfileSet profileSet)
+                    {
+                        foreach (var profile in profileSet.MaterialProfiles)
+                        {
+                            if (profile?.Material == null) continue;
+                            var c = ExtractColourFromMaterial(profile.Material, model);
+                            if (c != null) return c;
+                        }
+                    }
+
+                    if (material is IIfcMaterialProfileSetUsage profileUsage
+                        && profileUsage.ForProfileSet != null)
+                    {
+                        foreach (var profile in profileUsage.ForProfileSet.MaterialProfiles)
+                        {
+                            if (profile?.Material == null) continue;
+                            var c = ExtractColourFromMaterial(profile.Material, model);
+                            if (c != null) return c;
+                        }
+                    }
+                }
+            }
+            catch { /* non-critical */ }
+
+            return null;
+        }
+
+        private static XbimColour ExtractColourFromLayerSet(
+            IIfcMaterialLayerSet layerSet, IModel model)
+        {
+            if (layerSet?.MaterialLayers == null) return null;
+            foreach (var layer in layerSet.MaterialLayers)
+            {
+                if (layer?.Material == null) continue;
+                var c = ExtractColourFromMaterial(layer.Material, model);
+                if (c != null) return c;
+            }
+            return null;
+        }
+
+        private static XbimColour ExtractColourFromMaterial(
+            IIfcMaterial material, IModel model)
+        {
+            if (material == null) return null;
+            try
+            {
+                foreach (var rep in material.HasRepresentation)
+                {
+                    if (!(rep is IIfcMaterialDefinitionRepresentation matDefRep)) continue;
+                    foreach (var styledRep in matDefRep.Representations)
+                    {
+                        if (!(styledRep is IIfcStyledRepresentation sr)) continue;
+                        foreach (var styledItem in sr.Items)
+                        {
+                            if (!(styledItem is IIfcStyledItem si)) continue;
+                            foreach (var styleAssign in si.Styles)
+                            {
+                                foreach (var surfStyle in styleAssign.SurfaceStyles)
+                                {
+                                    if (!(surfStyle is IPersistEntity pe)) continue;
+                                    var c = ExtractColourFromSurfaceStyle(
+                                        model, pe.EntityLabel);
+                                    if (c != null) return c;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch { /* non-critical */ }
+            return null;
         }
 
         private static XbimColour GetFallbackColour(string typeName)
@@ -1503,6 +2280,23 @@ namespace IfcViewer.Ifc
         {
             public byte[]       ShapeData;
             public XbimMatrix3D Transformation;
+            /// <summary>
+            /// Product labels of the host element(s) this opening cuts.
+            /// Includes the host wall and its decomposed children (from IfcRelVoidsElement).
+            /// Null/empty when the relationship could not be resolved.
+            /// </summary>
+            public HashSet<int> HostProductLabels;
+        }
+
+        // ── Opening volume with host association ────────────────────────────
+        private sealed class OpeningVolume
+        {
+            public BoundingBox  Bounds;
+            /// <summary>
+            /// Product labels this opening is associated with.
+            /// Null/empty = untargeted (apply to all nearby wall-like elements).
+            /// </summary>
+            public HashSet<int> HostProductLabels;
         }
 
         // ── Wall-layer merge candidate (temporary, loader-only) ──────────────
@@ -1542,6 +2336,12 @@ namespace IfcViewer.Ifc
                 _g = Round(c.Green);
                 _b = Round(c.Blue);
                 _a = Round(c.Alpha);
+            }
+
+            // Cache-deserialisation path — values already in rounded form.
+            internal ColourKey(float r, float g, float b, float a)
+            {
+                _r = r; _g = g; _b = b; _a = a;
             }
 
             private static float Round(double v) => (float)Math.Round(v, 2);

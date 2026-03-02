@@ -40,6 +40,15 @@
                 <ResourceDictionary Source="pack://application:,,,/MaterialDesignThemes.Wpf;component/Themes/MaterialDesignTheme.Dark.xaml" />
                 <ResourceDictionary Source="pack://application:,,,/IfcViewer;component/UI/Themes/ElementStyles.xaml" />
             </ResourceDictionary.MergedDictionaries>
+            <!-- IFC model list context menu.
+                 Defined here (Window namescope) so the Click handlers resolve
+                 to the Window code-behind.  Inline Setter.Value would use a
+                 separate namescope and throw "Set connectionId" at init. -->
+            <ContextMenu x:Key="ModelItemContextMenu">
+                <MenuItem Header="Load"   Click="ModelContextMenu_Load_Click"/>
+                <MenuItem Header="Reload" Click="ModelContextMenu_Reload_Click"/>
+                <MenuItem Header="Remove" Click="ModelContextMenu_Remove_Click"/>
+            </ContextMenu>
         </ResourceDictionary>
     </Window.Resources>
 
@@ -120,8 +129,8 @@
                                 Click="AddIfc_Click"
                                 Style="{StaticResource CustomActionButtonStyle}"
                                 Width="32" Height="32" Margin="0,0,6,0"
-                                ToolTip="Add IFC file">
-                            <materialDesign:PackIcon Kind="FolderPlusOutline" Width="20" Height="20"/>
+                                ToolTip="Select IFC folder">
+                            <materialDesign:PackIcon Kind="FolderSearchOutline" Width="20" Height="20"/>
                         </Button>
                         <Button x:Name="RemoveIfcButton"
                                 Click="RemoveIfc_Click"
@@ -146,6 +155,14 @@
                                       ToolTip="Auto-sync Revit geometry — updates incrementally on every model change"
                                       Style="{StaticResource CustomActionToggleButtonStyle}">
                             <materialDesign:PackIcon Kind="SyncAlert" Width="20" Height="20"/>
+                        </ToggleButton>
+                        <ToggleButton x:Name="FollowSelectionToggle"
+                                      Checked="FollowSelection_Checked"
+                                      Unchecked="FollowSelection_Unchecked"
+                                      Width="32" Height="32" Margin="0,0,6,0"
+                                      ToolTip="Follow Revit selection and frame the matching object in the viewer"
+                                      Style="{StaticResource CustomActionToggleButtonStyle}">
+                            <materialDesign:PackIcon Kind="CursorDefaultClickOutline" Width="20" Height="20"/>
                         </ToggleButton>
                         <Separator Width="1" Margin="4,4" Background="{DynamicResource BorderBrush}"/>
                         <Button x:Name="ResetCameraButton"
@@ -216,17 +233,47 @@
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0"
-                                       Text="LOADED MODELS"
+                                       Text="IFC MODELS"
                                        FontSize="11" FontWeight="SemiBold"
                                        Foreground="{DynamicResource IconBrush}"
                                        Margin="8,8,8,4"/>
                             <ListBox x:Name="ModelListBox"
-                                     Grid.Row="1"
-                                     Background="Transparent"
-                                     BorderThickness="0"
-                                     Foreground="{DynamicResource ForegroundBrush}"
-                                     SelectionMode="Single"
-                                     Margin="4,0,4,4"/>
+                                      Grid.Row="1"
+                                      Background="Transparent"
+                                      BorderThickness="0"
+                                      Foreground="{DynamicResource ForegroundBrush}"
+                                      SelectionMode="Single"
+                                      MouseDoubleClick="ModelListBox_MouseDoubleClick"
+                                      Margin="4,0,4,4">
+                                <ListBox.ItemContainerStyle>
+                                    <Style TargetType="ListBoxItem">
+                                        <!-- Select the item on right-click so SelectedItem is
+                                             correct when the context menu handlers fire. -->
+                                        <EventSetter Event="PreviewMouseRightButtonDown"
+                                                     Handler="ModelListItem_PreviewMouseRightButtonDown"/>
+                                        <Setter Property="ContextMenu"
+                                                Value="{StaticResource ModelItemContextMenu}"/>
+                                    </Style>
+                                </ListBox.ItemContainerStyle>
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding DisplayName}"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   ToolTip="{Binding FilePath}">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Foreground" Value="{DynamicResource IconBrush}"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsLoaded}" Value="True">
+                                                            <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
                             <StackPanel Grid.Row="2" Margin="8,4,8,8">
                                 <TextBlock Text="IFC Opacity"
                                            Foreground="{DynamicResource IconBrush}"

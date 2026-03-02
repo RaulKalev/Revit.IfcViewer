@@ -208,6 +208,29 @@
                                 Margin="0,0,0,8"
                                 ValueChanged="Fov_ValueChanged"/>
 
+                        <!-- Follow-selection framing distance -->
+                        <Grid Margin="0,0,0,4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="46"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Follow distance multiplier"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       FontSize="11" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="FollowDistanceLabel" Grid.Column="1"
+                                       Text="2.0x"
+                                       Foreground="{DynamicResource ForegroundBrush}"
+                                       FontSize="11" HorizontalAlignment="Right"
+                                       VerticalAlignment="Center"/>
+                        </Grid>
+                        <Slider x:Name="FollowDistanceSlider"
+                                Minimum="1.0" Maximum="5.0" Value="2.0"
+                                SmallChange="0.1" LargeChange="0.5"
+                                IsSnapToTickEnabled="True" TickFrequency="0.1"
+                                Foreground="{DynamicResource TextHighlightBrush}"
+                                Margin="0,0,0,8"
+                                ValueChanged="FollowDistance_ValueChanged"/>
+
                     </StackPanel>
                 </ScrollViewer>
 

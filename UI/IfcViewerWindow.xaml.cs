@@ -8,6 +8,7 @@ using SharpDX;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
@@ -57,6 +58,11 @@ namespace IfcViewer.UI
         // Loaded IFC models — bound to ModelListBox
         private readonly ObservableCollection<IfcModel> _loadedModels
             = new ObservableCollection<IfcModel>();
+        private readonly ObservableCollection<IfcModelListItem> _ifcCatalogItems
+            = new ObservableCollection<IfcModelListItem>();
+        private readonly Dictionary<string, CachedIfcModel> _ifcModelCache
+            = new Dictionary<string, CachedIfcModel>(StringComparer.OrdinalIgnoreCase);
+        private string _activeIfcFolder;
 
         // Stage 3: Revit sync glue
         private SyncRevitEvent _syncRevitEvent;
@@ -66,6 +72,22 @@ namespace IfcViewer.UI
         private FirstPersonController _fpController;
         private SectionPlaneManager   _sectionMgr;
         private ViewerSettings        _settings;
+        private ViewerFocusService    _viewerFocusService;
+        private FollowSelectionService _followSelectionService;
+        private bool _applyingFollowSelectionState;
+        private readonly Dictionary<string, MeshGeometryModel3D> _ifcGuidMeshMap
+            = new Dictionary<string, MeshGeometryModel3D>(StringComparer.OrdinalIgnoreCase);
+        private static readonly string[] IfcGuidParameterNames = new[]
+        {
+            "IfcGUID",
+            "IFC GUID",
+            "IFC_GUID",
+            "IFCGUID",
+            "GlobalId",
+            "Global ID",
+            "IfcGlobalId",
+            "IFC GlobalId",
+        };
 
         // Stage 4: IFC file watchers + reload banner
         private readonly Dictionary<string, IfcFileWatcher> _fileWatchers
@@ -365,8 +387,8 @@ namespace IfcViewer.UI
                 AttachCameraOrientationSync();
                 UpdateCameraOrientationWidgets(force: true);
 
-                // 6. Bind the model list
-                ModelListBox.ItemsSource = _loadedModels;
+                // 6. Bind the IFC catalog list
+                ModelListBox.ItemsSource = _ifcCatalogItems;
 
                 // 7. Create the Revit sync ExternalEvent (must be on UI thread)
                 _syncRevitEvent = new SyncRevitEvent(Dispatcher);
@@ -382,6 +404,12 @@ namespace IfcViewer.UI
                 // camera to move even in normal orbit mode.
                 this.PreviewKeyDown += (s, ev) =>
                 {
+                    if (ev.Key == Key.Space && TryHideSelectedMesh())
+                    {
+                        ev.Handled = true;
+                        return;
+                    }
+
                     if (_fpController != null && !_fpController.IsActive && IsMovementKey(ev.Key))
                         ev.Handled = true;
                 };
@@ -390,10 +418,16 @@ namespace IfcViewer.UI
                 _sectionMgr = new SectionPlaneManager();
                 _sectionMgr.AttachVisual(_sceneRoot);
 
-                // 10. Load settings from disk (or defaults) and apply them
+                // 10. Follow-selection services
+                _viewerFocusService = new ViewerFocusService(_viewerHost.Camera);
+                _followSelectionService = new FollowSelectionService(
+                    _uiApp, OnRevitPrimarySelectionChanged);
+
+                // 11. Load settings from disk (or defaults) and apply them
                 _settings = ViewerSettings.Load();
                 ApplySettings();
                 RestoreWindowGeometry(_settings);
+                LoadSavedIfcFolderForCurrentProject();
 
                 // Wire up 3D view picker callbacks now that _settings is loaded.
                 // These are called from the Revit API thread via Dispatcher.Invoke
@@ -458,15 +492,21 @@ namespace IfcViewer.UI
                 _selectedMesh = null;
                 _ifcElementMap.Clear();
                 _revitElementMap.Clear();
+                _ifcGuidMeshMap.Clear();
+                _ifcCatalogItems.Clear();
+                _ifcModelCache.Clear();
 
                 this.PreviewMouseWheel -= OnPreviewMouseWheel;
                 DetachCameraOrientationSync();
+                _followSelectionService?.Dispose();
                 _fpController?.Dispose();
                 _sectionMgr?.DetachVisual();
                 _syncRevitEvent?.Dispose();
                 _sceneRoot?.Children.Clear();
                 _viewport?.Items.Clear();
                 _viewerHost?.Dispose();
+                _viewerFocusService = null;
+                _followSelectionService = null;
             }
             catch (Exception ex)
             {
@@ -487,98 +527,394 @@ namespace IfcViewer.UI
         }
 
         // ── Toolbar ───────────────────────────────────────────────────────────
-        private async void AddIfc_Click(object sender, RoutedEventArgs e)
+        private void AddIfc_Click(object sender, RoutedEventArgs e)
         {
-            var dlg = new OpenFileDialog
-            {
-                Title            = "Open IFC file(s)",
-                Filter           = "IFC Files (*.ifc)|*.ifc|All Files (*.*)|*.*",
-                Multiselect      = true,
-                CheckFileExists  = true,
-            };
-            if (dlg.ShowDialog(this) != true) return;
+            string folderPath;
+            if (!TrySelectIfcFolder(out folderPath)) return;
+            SetIfcFolder(folderPath, persistForProject: true);
+        }
 
-            foreach (string path in dlg.FileNames)
-            {
-                // Guard: don't load the same file twice
-                bool alreadyLoaded = false;
-                foreach (var m in _loadedModels)
-                    if (string.Equals(m.FilePath, path, StringComparison.OrdinalIgnoreCase))
-                    { alreadyLoaded = true; break; }
-                if (alreadyLoaded) continue;
+        private async void ModelListBox_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+        {
+            var item = ModelListBox.SelectedItem as IfcModelListItem;
+            if (item == null || string.IsNullOrWhiteSpace(item.FilePath)) return;
+            if (item.IsLoaded) return;
 
-                UpdateStatus("Loading: " + System.IO.Path.GetFileName(path) + " …");
-                AddIfcButton.IsEnabled    = false;
-                RemoveIfcButton.IsEnabled = false;
-
-                try
-                {
-                    IfcModel ifcModel = await IfcLoader.LoadAsync(path, Dispatcher,
-                        onProgress: msg => UpdateStatus(msg));
-
-                    // Attach to scene on UI thread
-                    _viewerHost.IfcRoot.Children.Add(ifcModel.SceneGroup);
-                    _loadedModels.Add(ifcModel);
-                    ModelListBox.SelectedItem = ifcModel;
-
-                    // Populate the element selection map with this model's per-element meshes
-                    foreach (var kvp in ifcModel.ElementMap)
-                        _ifcElementMap[kvp.Key] = kvp.Value;
-
-                    // Register all cross-section meshes with the section plane manager
-                    _sectionMgr?.RegisterGroup(ifcModel.SceneGroup);
-
-                    // Rebuild element outlines (always-on) and optional wireframe overlay
-                    RebuildOutline();
-                    if (WireframeToggle?.IsChecked == true)
-                        RebuildWireframe();
-
-                    // Update section slider range to cover the full scene
-                    UpdateSectionBounds();
-
-                    // Fit camera only on the very first geometry load so the user's
-                    // current camera position is preserved when adding additional models.
-                    if (_loadedModels.Count == 1 && _revitModel == null)
-                        _viewerHost.FitView(ifcModel.Bounds);
-
-                    // Watch the file for external changes (e.g. re-export from Revit)
-                    var watcher = new IfcFileWatcher(path,
-                        () => Dispatcher.BeginInvoke((Action)(() => ShowReloadBanner(path))));
-                    _fileWatchers[path] = watcher;
-
-                    UpdateStatus(ifcModel.DisplayName + "  |  " +
-                                 ifcModel.MeshCount + " elements  |  " +
-                                 ifcModel.TriangleCount + " triangles");
-                    SessionLogger.Info("Loaded: " + ifcModel.DisplayName);
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show(this,
-                        "Failed to load IFC file:\n\n" + ex.Message,
-                        "IFC Load Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                    SessionLogger.Error("IFC load failed: " + path, ex);
-                    UpdateStatus("Load failed — see log.");
-                }
-                finally
-                {
-                    AddIfcButton.IsEnabled    = true;
-                    RemoveIfcButton.IsEnabled = true;
-                }
-            }
+            await LoadIfcModelByPathAsync(item.FilePath);
         }
 
         private void RemoveIfc_Click(object sender, RoutedEventArgs e)
         {
-            if (!(ModelListBox.SelectedItem is IfcModel selected)) return;
+            var item = ModelListBox.SelectedItem as IfcModelListItem;
+            if (item == null || !item.IsLoaded) return;
 
-            // Dispose file watcher for this path
-            if (_fileWatchers.TryGetValue(selected.FilePath, out var watcher))
+            IfcModel selected = FindLoadedModel(item.FilePath);
+            if (selected == null)
+            {
+                item.IsLoaded = false;
+                return;
+            }
+
+            UnloadIfcModel(selected, removeFromCache: false);
+            SessionLogger.Info("Removed: " + selected.DisplayName);
+        }
+
+        // ── Model list context menu ───────────────────────────────────────────
+
+        /// <summary>
+        /// Selects the right-clicked list item so SelectedItem is correct
+        /// when the context menu Click handlers fire.
+        /// </summary>
+        private void ModelListItem_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            var listBoxItem = sender as ListBoxItem;
+            if (listBoxItem != null)
+                listBoxItem.IsSelected = true;
+        }
+
+        private async void ModelContextMenu_Load_Click(object sender, RoutedEventArgs e)
+        {
+            var item = ModelListBox.SelectedItem as IfcModelListItem;
+            if (item == null || string.IsNullOrWhiteSpace(item.FilePath)) return;
+            if (item.IsLoaded) return;
+
+            await LoadIfcModelByPathAsync(item.FilePath);
+        }
+
+        private async void ModelContextMenu_Reload_Click(object sender, RoutedEventArgs e)
+        {
+            var item = ModelListBox.SelectedItem as IfcModelListItem;
+            if (item == null || string.IsNullOrWhiteSpace(item.FilePath)) return;
+
+            string path = item.FilePath;
+
+            // Unload from scene if currently loaded
+            IfcModel loaded = FindLoadedModel(path);
+            if (loaded != null)
+                UnloadIfcModel(loaded, removeFromCache: true, updateStatus: false);
+
+            // Purge in-memory cache entry and disk cache so next load rebuilds fully
+            _ifcModelCache.Remove(path);
+            IfcLoader.InvalidateCache(path);
+
+            SessionLogger.Info("Reloading (cache cleared): " + Path.GetFileNameWithoutExtension(path));
+            await LoadIfcModelByPathAsync(path);
+        }
+
+        private void ModelContextMenu_Remove_Click(object sender, RoutedEventArgs e)
+        {
+            var item = ModelListBox.SelectedItem as IfcModelListItem;
+            if (item == null || !item.IsLoaded) return;
+
+            IfcModel selected = FindLoadedModel(item.FilePath);
+            if (selected == null)
+            {
+                item.IsLoaded = false;
+                return;
+            }
+
+            UnloadIfcModel(selected, removeFromCache: false);
+            SessionLogger.Info("Removed: " + selected.DisplayName);
+        }
+
+        private bool TrySelectIfcFolder(out string folderPath)
+        {
+            folderPath = null;
+
+            var dlg = new OpenFileDialog
+            {
+                Title = "Select IFC folder",
+                Filter = "Folder selection|*.folder",
+                FileName = "Select this folder",
+                CheckFileExists = false,
+                CheckPathExists = true,
+                ValidateNames = false,
+                Multiselect = false,
+            };
+
+            if (dlg.ShowDialog(this) != true) return false;
+
+            string candidate = null;
+            try { candidate = Path.GetDirectoryName(dlg.FileName); }
+            catch { }
+
+            if (string.IsNullOrWhiteSpace(candidate))
+                candidate = dlg.FileName;
+
+            if (string.IsNullOrWhiteSpace(candidate) || !Directory.Exists(candidate))
+            {
+                MessageBox.Show(this,
+                    "Invalid folder selection.",
+                    "Folder Selection", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return false;
+            }
+
+            folderPath = candidate;
+            return true;
+        }
+
+        private void SetIfcFolder(string folderPath, bool persistForProject)
+        {
+            if (string.IsNullOrWhiteSpace(folderPath) || !Directory.Exists(folderPath))
+                return;
+
+            _activeIfcFolder = folderPath;
+
+            if (persistForProject && _settings != null)
+            {
+                string projectKey = GetCurrentProjectKey();
+                if (!string.IsNullOrWhiteSpace(projectKey))
+                {
+                    _settings.IfcFoldersByProject[projectKey] = folderPath;
+                    _settings.Save();
+                }
+            }
+
+            RefreshIfcCatalog(folderPath);
+
+            if (_ifcCatalogItems.Count == 0)
+                UpdateStatus("No IFC files found in folder.");
+            else
+                UpdateStatus("Folder loaded — double-click a model to load it.");
+
+            SessionLogger.Info("IFC folder selected: " + folderPath);
+        }
+
+        private void LoadSavedIfcFolderForCurrentProject()
+        {
+            if (_settings == null || _settings.IfcFoldersByProject == null) return;
+
+            string projectKey = GetCurrentProjectKey();
+            if (string.IsNullOrWhiteSpace(projectKey)) return;
+
+            string folderPath;
+            if (!_settings.IfcFoldersByProject.TryGetValue(projectKey, out folderPath))
+                return;
+
+            if (!Directory.Exists(folderPath))
+            {
+                SessionLogger.Warn("Saved IFC folder not found: " + folderPath);
+                return;
+            }
+
+            SetIfcFolder(folderPath, persistForProject: false);
+        }
+
+        private string GetCurrentProjectKey()
+        {
+            var doc = _uiApp?.ActiveUIDocument?.Document;
+            if (doc == null) return "NO_ACTIVE_PROJECT";
+
+            string pathName = null;
+            try { pathName = doc.PathName; }
+            catch { }
+
+            if (!string.IsNullOrWhiteSpace(pathName))
+                return pathName;
+
+            string title = null;
+            try { title = doc.Title; }
+            catch { }
+
+            if (string.IsNullOrWhiteSpace(title))
+                title = "UNTITLED";
+
+            return "UNSAVED::" + title;
+        }
+
+        private void RefreshIfcCatalog(string folderPath)
+        {
+            string[] filePaths;
+            try
+            {
+                filePaths = Directory.GetFiles(folderPath, "*.ifc", SearchOption.TopDirectoryOnly);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this,
+                    "Failed to read IFC folder:\n\n" + ex.Message,
+                    "Folder Read Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                SessionLogger.Error("Failed to enumerate IFC folder: " + folderPath, ex);
+                return;
+            }
+
+            Array.Sort(filePaths, StringComparer.OrdinalIgnoreCase);
+            var inFolder = new HashSet<string>(filePaths, StringComparer.OrdinalIgnoreCase);
+
+            // Keep scene consistent with the active catalog: unload models outside this folder.
+            foreach (IfcModel model in _loadedModels.ToList())
+            {
+                if (!inFolder.Contains(model.FilePath))
+                    UnloadIfcModel(model, removeFromCache: false, updateStatus: false);
+            }
+
+            _ifcCatalogItems.Clear();
+            foreach (string path in filePaths)
+            {
+                var item = new IfcModelListItem(path)
+                {
+                    IsLoaded = FindLoadedModel(path) != null
+                };
+                _ifcCatalogItems.Add(item);
+            }
+        }
+
+        private async Task LoadIfcModelByPathAsync(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return;
+            if (!File.Exists(path))
+            {
+                MessageBox.Show(this,
+                    "IFC file not found:\n\n" + path,
+                    "IFC Load Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            IfcModel alreadyLoaded = FindLoadedModel(path);
+            if (alreadyLoaded != null)
+            {
+                SetCatalogLoadedState(path, true);
+                SelectCatalogItem(path);
+                return;
+            }
+
+            UpdateStatus("Loading: " + Path.GetFileName(path) + " …");
+            AddIfcButton.IsEnabled = false;
+            RemoveIfcButton.IsEnabled = false;
+
+            bool loadedFromCache = false;
+            try
+            {
+                DateTime writeUtc = File.GetLastWriteTimeUtc(path);
+                CachedIfcModel cached;
+                IfcModel ifcModel = null;
+
+                if (_ifcModelCache.TryGetValue(path, out cached)
+                    && cached != null
+                    && cached.Model != null
+                    && cached.LastWriteUtc == writeUtc)
+                {
+                    ifcModel = cached.Model;
+                    loadedFromCache = true;
+                }
+                else
+                {
+                    ifcModel = await IfcLoader.LoadAsync(path, Dispatcher, onProgress: UpdateStatus);
+                    _ifcModelCache[path] = new CachedIfcModel(ifcModel, writeUtc);
+                }
+
+                AttachIfcModel(ifcModel);
+                SetCatalogLoadedState(path, true);
+                SelectCatalogItem(path);
+
+                UpdateStatus(ifcModel.DisplayName + "  |  " +
+                             ifcModel.MeshCount + " elements  |  " +
+                             ifcModel.TriangleCount + " triangles" +
+                             (loadedFromCache ? "  |  cache" : ""));
+                SessionLogger.Info("Loaded: " + ifcModel.DisplayName +
+                                   (loadedFromCache ? " (cache)" : ""));
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this,
+                    "Failed to load IFC file:\n\n" + ex.Message,
+                    "IFC Load Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                SessionLogger.Error("IFC load failed: " + path, ex);
+                UpdateStatus("Load failed — see log.");
+            }
+            finally
+            {
+                AddIfcButton.IsEnabled = true;
+                RemoveIfcButton.IsEnabled = true;
+            }
+        }
+
+        private void AttachIfcModel(IfcModel ifcModel)
+        {
+            if (ifcModel == null) return;
+
+            _viewerHost.IfcRoot.Children.Add(ifcModel.SceneGroup);
+            _loadedModels.Add(ifcModel);
+
+            foreach (var kvp in ifcModel.ElementMap)
+                _ifcElementMap[kvp.Key] = kvp.Value;
+            RebuildIfcGuidMap();
+
+            _sectionMgr?.RegisterGroup(ifcModel.SceneGroup);
+            RebuildOutline();
+            if (WireframeToggle?.IsChecked == true)
+                RebuildWireframe();
+
+            UpdateSectionBounds();
+
+            if (_loadedModels.Count == 1 && _revitModel == null)
+                _viewerHost.FitView(ifcModel.Bounds);
+
+            RegisterIfcWatcher(ifcModel.FilePath);
+        }
+
+        private void RegisterIfcWatcher(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return;
+
+            IfcFileWatcher existing;
+            if (_fileWatchers.TryGetValue(path, out existing))
+            {
+                existing.Dispose();
+                _fileWatchers.Remove(path);
+            }
+
+            var watcher = new IfcFileWatcher(path,
+                () => Dispatcher.BeginInvoke((Action)(() => ShowReloadBanner(path))));
+            _fileWatchers[path] = watcher;
+        }
+
+        private IfcModel FindLoadedModel(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return null;
+            foreach (IfcModel model in _loadedModels)
+            {
+                if (string.Equals(model.FilePath, path, StringComparison.OrdinalIgnoreCase))
+                    return model;
+            }
+            return null;
+        }
+
+        private void SetCatalogLoadedState(string path, bool isLoaded)
+        {
+            foreach (IfcModelListItem item in _ifcCatalogItems)
+            {
+                if (!string.Equals(item.FilePath, path, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                item.IsLoaded = isLoaded;
+                return;
+            }
+        }
+
+        private void SelectCatalogItem(string path)
+        {
+            foreach (IfcModelListItem item in _ifcCatalogItems)
+            {
+                if (!string.Equals(item.FilePath, path, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                ModelListBox.SelectedItem = item;
+                return;
+            }
+        }
+
+        private void UnloadIfcModel(IfcModel selected, bool removeFromCache, bool updateStatus = true)
+        {
+            if (selected == null) return;
+
+            IfcFileWatcher watcher;
+            if (_fileWatchers.TryGetValue(selected.FilePath, out watcher))
             {
                 watcher.Dispose();
                 _fileWatchers.Remove(selected.FilePath);
             }
 
-            // Clear pending reload if it was for this model
             if (_pendingReload != null &&
                 string.Equals(_pendingReload.FilePath, selected.FilePath, StringComparison.OrdinalIgnoreCase))
             {
@@ -586,27 +922,35 @@ namespace IfcViewer.UI
                 ReloadBanner.Visibility = Visibility.Collapsed;
             }
 
-            // Clear selection if the selected element belongs to the model being removed
             if (_selectedMesh != null && selected.ElementMap.ContainsKey(_selectedMesh))
                 ClearSelection();
 
-            // Remove this model's meshes from the flat element map
             foreach (var mesh in selected.ElementMap.Keys)
                 _ifcElementMap.Remove(mesh);
+            RebuildIfcGuidMap();
 
-            // Remove from scene
             _sectionMgr?.UnregisterGroup(selected.SceneGroup);
             _viewerHost.IfcRoot.Children.Remove(selected.SceneGroup);
             _loadedModels.Remove(selected);
+            SetCatalogLoadedState(selected.FilePath, false);
 
-            // Rebuild outline and optional wireframe without the removed model's edges
+            if (removeFromCache)
+                _ifcModelCache.Remove(selected.FilePath);
+
             RebuildOutline();
-            if (WireframeToggle?.IsChecked == true) RebuildWireframe();
+            if (WireframeToggle?.IsChecked == true)
+                RebuildWireframe();
+            UpdateSectionBounds();
 
-            UpdateStatus(_loadedModels.Count == 0
-                ? "GPU Viewport Active"
-                : _loadedModels.Count + " model(s) loaded");
-            SessionLogger.Info("Removed: " + selected.DisplayName);
+            if (updateStatus)
+            {
+                if (_loadedModels.Count == 0)
+                    UpdateStatus(_ifcCatalogItems.Count == 0
+                        ? "GPU Viewport Active"
+                        : "No IFC loaded — double-click a model name.");
+                else
+                    UpdateStatus(_loadedModels.Count + " model(s) loaded");
+            }
         }
 
         private void SyncRevit_Click(object sender, RoutedEventArgs e)
@@ -748,81 +1092,34 @@ namespace IfcViewer.UI
 
             string path = model.FilePath;
 
-            // Clear selection if the selected element belongs to the model being reloaded
-            if (_selectedMesh != null && model.ElementMap.ContainsKey(_selectedMesh))
-                ClearSelection();
-
-            // Remove old model's meshes from the flat element map
-            foreach (var mesh in model.ElementMap.Keys)
-                _ifcElementMap.Remove(mesh);
-
-            // Remove the old model from the scene
-            _sectionMgr?.UnregisterGroup(model.SceneGroup);
-            _viewerHost.IfcRoot.Children.Remove(model.SceneGroup);
-            _loadedModels.Remove(model);
-
-            // Dispose and recreate the watcher (file may have moved/been recreated)
-            if (_fileWatchers.TryGetValue(path, out var oldWatcher))
-            {
-                oldWatcher.Dispose();
-                _fileWatchers.Remove(path);
-            }
-
-            AddIfcButton.IsEnabled    = false;
-            RemoveIfcButton.IsEnabled = false;
-            UpdateStatus("Reloading: " + System.IO.Path.GetFileName(path) + " …");
-
-            try
-            {
-                IfcModel newModel = await IfcLoader.LoadAsync(path, Dispatcher,
-                    onProgress: msg => UpdateStatus(msg));
-
-                _viewerHost.IfcRoot.Children.Add(newModel.SceneGroup);
-                _loadedModels.Add(newModel);
-                ModelListBox.SelectedItem = newModel;
-
-                // Populate element map with the freshly loaded model's meshes
-                foreach (var kvp in newModel.ElementMap)
-                    _ifcElementMap[kvp.Key] = kvp.Value;
-
-                _sectionMgr?.RegisterGroup(newModel.SceneGroup);
-                UpdateSectionBounds();
-                // Don't move the camera on reload — user keeps their current view position.
-
-                // Rebuild element outlines and optional wireframe for the freshly reloaded geometry
-                RebuildOutline();
-                if (WireframeToggle?.IsChecked == true)
-                    RebuildWireframe();
-
-                // Restart the watcher for the reloaded path
-                var newWatcher = new IfcFileWatcher(path,
-                    () => Dispatcher.BeginInvoke((Action)(() => ShowReloadBanner(path))));
-                _fileWatchers[path] = newWatcher;
-
-                UpdateStatus(newModel.DisplayName + "  |  " +
-                             newModel.MeshCount + " elements  |  " +
-                             newModel.TriangleCount + " triangles");
-                SessionLogger.Info("Reloaded: " + newModel.DisplayName);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this,
-                    "Failed to reload IFC file:\n\n" + ex.Message,
-                    "Reload Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                SessionLogger.Error("IFC reload failed: " + path, ex);
-                UpdateStatus("Reload failed — see log.");
-            }
-            finally
-            {
-                AddIfcButton.IsEnabled    = true;
-                RemoveIfcButton.IsEnabled = true;
-            }
+            // Force full rebuild after an external file change.
+            _ifcModelCache.Remove(path);
+            UnloadIfcModel(model, removeFromCache: false, updateStatus: false);
+            await LoadIfcModelByPathAsync(path);
+            SessionLogger.Info("Reloaded: " + Path.GetFileNameWithoutExtension(path));
         }
 
         private void ReloadBannerDismiss_Click(object sender, RoutedEventArgs e)
         {
             ReloadBanner.Visibility = Visibility.Collapsed;
             _pendingReload = null;
+        }
+
+        private bool TryHideSelectedMesh()
+        {
+            if (_selectedMesh == null) return false;
+
+            _selectedMesh.Visibility = Visibility.Collapsed;
+            ClearSelection();
+
+            // Rebuild wireframe/outline from visible meshes only — the hidden mesh's
+            // lines must not linger after the mesh itself disappears.
+            RebuildOutline();
+            if (WireframeToggle?.IsChecked == true)
+                RebuildWireframe();
+
+            SessionLogger.Info("Hidden selected element.");
+            return true;
         }
 
         // ── Element selection ─────────────────────────────────────────────────
@@ -1112,6 +1409,286 @@ namespace IfcViewer.UI
 
         private void ResetCamera_Click(object sender, RoutedEventArgs e)
             => _viewerHost?.ResetCamera();
+
+        private void FollowSelection_Checked(object sender, RoutedEventArgs e)
+            => SetFollowSelectionEnabled(true);
+
+        private void FollowSelection_Unchecked(object sender, RoutedEventArgs e)
+            => SetFollowSelectionEnabled(false);
+
+        private void SetFollowSelectionEnabled(bool enabled)
+        {
+            if (_applyingFollowSelectionState) return;
+
+            if (_settings != null)
+            {
+                _settings.FollowSelectionEnabled = enabled;
+                _settings.Save();
+            }
+
+            if (_followSelectionService != null)
+                _followSelectionService.IsEnabled = enabled;
+
+            SessionLogger.Info(enabled
+                ? "Follow selection enabled."
+                : "Follow selection disabled.");
+        }
+
+        private void OnRevitPrimarySelectionChanged(
+            UIDocument uiDoc,
+            Autodesk.Revit.DB.ElementId elementId)
+        {
+            if (uiDoc == null
+                || elementId == null
+                || elementId == Autodesk.Revit.DB.ElementId.InvalidElementId)
+                return;
+
+            MeshGeometryModel3D targetMesh;
+            string resolutionMode;
+            if (!TryResolveViewerMesh(uiDoc, elementId, out targetMesh, out resolutionMode))
+                return;
+
+            Action focusAction = () =>
+            {
+                if (_viewerFocusService?.FocusByMesh(targetMesh) == true)
+                {
+                    SessionLogger.Info(
+                        $"Follow selection: focused ElementId {elementId.Value} via {resolutionMode}.");
+                }
+            };
+
+            if (Dispatcher.CheckAccess()) focusAction();
+            else Dispatcher.BeginInvoke(focusAction);
+        }
+
+        private bool TryResolveViewerMesh(
+            UIDocument uiDoc,
+            Autodesk.Revit.DB.ElementId elementId,
+            out MeshGeometryModel3D mesh,
+            out string resolutionMode)
+        {
+            mesh = null;
+            resolutionMode = null;
+
+            // A) Direct Revit ElementId → rendered mesh mapping.
+            if (_revitModel?.ElementMeshes != null
+                && _revitModel.ElementMeshes.TryGetValue(elementId, out mesh))
+            {
+                resolutionMode = "ElementId";
+                return true;
+            }
+
+            var doc = uiDoc.Document;
+            var element = doc?.GetElement(elementId);
+            if (element == null) return false;
+
+            // B) IFC GUID mapping (when IFC model is loaded and GUIDs are available).
+            string ifcGuid;
+            if (TryGetIfcGuid(element, out ifcGuid)
+                && _ifcGuidMeshMap.TryGetValue(ifcGuid, out mesh))
+            {
+                resolutionMode = "IFC GUID";
+                return true;
+            }
+
+            // C) Fallback spatial mapping using element bounding-box center.
+            Vector3 center;
+            if (TryGetElementCenter(uiDoc, element, out center))
+            {
+                float toleranceM = 0.2f;
+                if (_settings != null)
+                {
+                    toleranceM = (float)Math.Max(10.0,
+                        _settings.FollowSelectionSpatialToleranceMm) / 1000f;
+                }
+
+                if (TryFindNearestRenderedMesh(center, toleranceM, out mesh))
+                {
+                    resolutionMode = "spatial";
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool TryGetIfcGuid(Autodesk.Revit.DB.Element element, out string ifcGuid)
+        {
+            ifcGuid = null;
+            if (element == null) return false;
+
+            if (TryGetIfcGuidFromElement(element, out ifcGuid))
+                return true;
+
+            try
+            {
+                Autodesk.Revit.DB.ElementId typeId = element.GetTypeId();
+                if (typeId != null && typeId != Autodesk.Revit.DB.ElementId.InvalidElementId)
+                {
+                    Autodesk.Revit.DB.Element typeElement = element.Document.GetElement(typeId);
+                    if (TryGetIfcGuidFromElement(typeElement, out ifcGuid))
+                        return true;
+                }
+            }
+            catch
+            {
+                // Type lookup is best-effort only.
+            }
+
+            return false;
+        }
+
+        private static bool TryGetIfcGuidFromElement(
+            Autodesk.Revit.DB.Element element,
+            out string ifcGuid)
+        {
+            ifcGuid = null;
+            if (element == null) return false;
+
+            foreach (string parameterName in IfcGuidParameterNames)
+            {
+                var p = element.LookupParameter(parameterName);
+                if (TryReadGuidParameter(p, out ifcGuid))
+                    return true;
+            }
+
+            foreach (Autodesk.Revit.DB.Parameter parameter in element.Parameters)
+            {
+                string parameterName = parameter?.Definition?.Name;
+                if (string.IsNullOrWhiteSpace(parameterName)) continue;
+
+                foreach (string candidate in IfcGuidParameterNames)
+                {
+                    if (!string.Equals(parameterName, candidate, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    if (TryReadGuidParameter(parameter, out ifcGuid))
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryReadGuidParameter(
+            Autodesk.Revit.DB.Parameter parameter,
+            out string value)
+        {
+            value = null;
+            if (parameter == null) return false;
+
+            try { value = parameter.AsString(); }
+            catch { }
+
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                try { value = parameter.AsValueString(); }
+                catch { }
+            }
+
+            value = NormalizeIfcGuid(value);
+            return !string.IsNullOrEmpty(value);
+        }
+
+        private static bool TryGetElementCenter(
+            UIDocument uiDoc,
+            Autodesk.Revit.DB.Element element,
+            out Vector3 center)
+        {
+            center = new Vector3();
+            if (element == null) return false;
+
+            Autodesk.Revit.DB.BoundingBoxXYZ bb = null;
+            try { bb = element.get_BoundingBox(uiDoc?.ActiveView); }
+            catch { }
+
+            if (bb == null)
+            {
+                try { bb = element.get_BoundingBox(null); }
+                catch { }
+            }
+
+            if (bb == null || bb.Min == null || bb.Max == null) return false;
+
+            Autodesk.Revit.DB.XYZ xyzCenter = (bb.Min + bb.Max) * 0.5;
+            center = ToViewerPoint(xyzCenter);
+            return true;
+        }
+
+        private bool TryFindNearestRenderedMesh(
+            Vector3 point,
+            float toleranceMeters,
+            out MeshGeometryModel3D nearestMesh)
+        {
+            nearestMesh = null;
+
+            float bestDistSq = toleranceMeters * toleranceMeters;
+            Vector3 center;
+
+            foreach (MeshGeometryModel3D mesh in _ifcElementMap.Keys)
+            {
+                if (!TryGetMeshCenter(mesh, out center)) continue;
+                float distSq = (center - point).LengthSquared();
+                if (distSq > bestDistSq) continue;
+
+                bestDistSq = distSq;
+                nearestMesh = mesh;
+            }
+
+            if (_revitModel?.ElementMeshes != null)
+            {
+                foreach (MeshGeometryModel3D mesh in _revitModel.ElementMeshes.Values)
+                {
+                    if (!TryGetMeshCenter(mesh, out center)) continue;
+                    float distSq = (center - point).LengthSquared();
+                    if (distSq > bestDistSq) continue;
+
+                    bestDistSq = distSq;
+                    nearestMesh = mesh;
+                }
+            }
+
+            return nearestMesh != null;
+        }
+
+        private static bool TryGetMeshCenter(MeshGeometryModel3D mesh, out Vector3 center)
+        {
+            center = new Vector3();
+            if (mesh?.Geometry == null) return false;
+
+            BoundingBox bb = mesh.Geometry.Bound;
+            center = (bb.Minimum + bb.Maximum) * 0.5f;
+            return true;
+        }
+
+        private static Vector3 ToViewerPoint(Autodesk.Revit.DB.XYZ point)
+        {
+            const float feetToMeters = 0.3048f;
+            return new Vector3(
+                (float)point.X * feetToMeters,
+                (float)point.Z * feetToMeters,
+               -(float)point.Y * feetToMeters);
+        }
+
+        private void RebuildIfcGuidMap()
+        {
+            _ifcGuidMeshMap.Clear();
+
+            foreach (var kv in _ifcElementMap)
+            {
+                string key = NormalizeIfcGuid(kv.Value?.GlobalId);
+                if (string.IsNullOrEmpty(key)) continue;
+                if (_ifcGuidMeshMap.ContainsKey(key)) continue;
+
+                _ifcGuidMeshMap[key] = kv.Key;
+            }
+        }
+
+        private static string NormalizeIfcGuid(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            return raw.Trim().Trim('{', '}', '(', ')').ToUpperInvariant();
+        }
 
         private void Wireframe_Checked(object sender, RoutedEventArgs e)
             => RebuildWireframe();
@@ -2579,6 +3156,9 @@ namespace IfcViewer.UI
                 // building geometry, and would produce a giant diagonal line.
                 if (_sectionMgr != null &&
                     ReferenceEquals(child, _sectionMgr.PlaneVisual)) continue;
+                // Skip hidden elements — wireframe/outline should only reflect
+                // what is actually visible on screen.
+                if (child.Visibility != Visibility.Visible) continue;
                 if (child is MeshGeometryModel3D m && m.Geometry is MeshGeometry3D mg)
                     results.Add(mg);
                 else if (child is GroupModel3D sub)
@@ -2805,6 +3385,8 @@ namespace IfcViewer.UI
         /// </summary>
         private void ApplySettings()
         {
+            if (_settings == null) return;
+
             // Walk controller
             if (_fpController != null)
             {
@@ -2816,6 +3398,33 @@ namespace IfcViewer.UI
             // Camera FOV
             if (_viewerHost?.Camera != null)
                 _viewerHost.Camera.FieldOfView = _settings.FieldOfView;
+
+            // Follow Revit selection
+            if (_followSelectionService != null)
+            {
+                _followSelectionService.DebounceMilliseconds =
+                    Math.Max(150, Math.Min(300, _settings.FollowSelectionDebounceMs));
+                _followSelectionService.IsEnabled = _settings.FollowSelectionEnabled;
+            }
+
+            if (_viewerFocusService != null)
+            {
+                _viewerFocusService.DistanceMultiplier = Math.Max(
+                    1.0, Math.Min(5.0, _settings.FollowSelectionDistanceMultiplier));
+            }
+
+            if (FollowSelectionToggle != null)
+            {
+                _applyingFollowSelectionState = true;
+                try
+                {
+                    FollowSelectionToggle.IsChecked = _settings.FollowSelectionEnabled;
+                }
+                finally
+                {
+                    _applyingFollowSelectionState = false;
+                }
+            }
         }
 
         // ── Instant scroll-wheel zoom (no inertia) ────────────────────────────
@@ -2851,6 +3460,18 @@ namespace IfcViewer.UI
 
             // Block Helix's own zoom handler completely
             e.Handled = true;
+        }
+
+        private sealed class CachedIfcModel
+        {
+            public readonly IfcModel Model;
+            public readonly DateTime LastWriteUtc;
+
+            public CachedIfcModel(IfcModel model, DateTime lastWriteUtc)
+            {
+                Model = model;
+                LastWriteUtc = lastWriteUtc;
+            }
         }
 
         // ── Resize edges ──────────────────────────────────────────────────────

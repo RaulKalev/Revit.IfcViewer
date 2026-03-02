@@ -54,6 +54,7 @@ namespace IfcViewer.UI
             ZoomStepSlider.Value   = Math.Round(_settings.ZoomStep * 100.0);
 
             FovSlider.Value        = _settings.FieldOfView;
+            FollowDistanceSlider.Value = _settings.FollowSelectionDistanceMultiplier;
 
             _loading = false;
             RefreshLabels();
@@ -66,6 +67,7 @@ namespace IfcViewer.UI
             MouseSensLabel.Text  = ((int)Math.Round(_settings.MouseSensitivity * 1000)).ToString();
             ZoomStepLabel.Text   = ((int)Math.Round(_settings.ZoomStep * 100)) + "%";
             FovLabel.Text        = ((int)_settings.FieldOfView) + "°";
+            FollowDistanceLabel.Text = _settings.FollowSelectionDistanceMultiplier.ToString("F1") + "x";
         }
 
         // ── Slider change handlers ────────────────────────────────────────────
@@ -125,6 +127,17 @@ namespace IfcViewer.UI
             UpdateApplyButtonState();
         }
 
+        private void FollowDistance_ValueChanged(object sender,
+            RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (_loading || _settings == null) return;
+            _settings.FollowSelectionDistanceMultiplier = e.NewValue;
+            FollowDistanceLabel.Text = e.NewValue.ToString("F1") + "x";
+            _hasChanges = true;
+            _onChange?.Invoke();
+            UpdateApplyButtonState();
+        }
+
         private void UpdateApplyButtonState()
         {
             if (ApplyButton != null)
@@ -141,6 +154,10 @@ namespace IfcViewer.UI
             _settings.MouseSensitivity = 0.003;
             _settings.ZoomStep         = 0.10;
             _settings.FieldOfView      = 45.0;
+            _settings.FollowSelectionEnabled = false;
+            _settings.FollowSelectionDebounceMs = 220;
+            _settings.FollowSelectionSpatialToleranceMm = 200.0;
+            _settings.FollowSelectionDistanceMultiplier = 2.0;
 
             LoadFromSettings();
             _hasChanges = true;

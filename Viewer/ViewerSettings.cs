@@ -35,6 +35,31 @@ namespace IfcViewer.Viewer
         /// <summary>Perspective field of view in degrees.</summary>
         public double FieldOfView { get; set; } = 45.0;
 
+        // ── Follow selection ─────────────────────────────────────────────────
+        /// <summary>
+        /// When enabled, selecting an element in Revit automatically frames the
+        /// corresponding element in the viewer.
+        /// </summary>
+        public bool FollowSelectionEnabled { get; set; } = false;
+
+        /// <summary>
+        /// Minimum time between follow-camera updates in milliseconds.
+        /// Clamped to 150-300 ms by the runtime service.
+        /// </summary>
+        public int FollowSelectionDebounceMs { get; set; } = 220;
+
+        /// <summary>
+        /// Fallback spatial-mapping tolerance in millimetres.
+        /// Used when direct ID/GUID mapping is not available.
+        /// </summary>
+        public double FollowSelectionSpatialToleranceMm { get; set; } = 200.0;
+
+        /// <summary>
+        /// Camera distance multiplier used when framing followed selections.
+        /// 1.0 = current framing distance, 2.0 = twice as far.
+        /// </summary>
+        public double FollowSelectionDistanceMultiplier { get; set; } = 2.0;
+
         // ── Window geometry ───────────────────────────────────────────────────
         /// <summary>Saved window position and size. Null = use XAML defaults.</summary>
         public double? WindowLeft   { get; set; }
@@ -50,6 +75,13 @@ namespace IfcViewer.Viewer
         /// does not have to pick a view on every export.
         /// </summary>
         public Dictionary<string, string> SavedRevit3DViews { get; set; }
+            = new Dictionary<string, string>();
+
+        /// <summary>
+        /// Per-project saved IFC folder location.
+        /// Key = Revit document path (or synthetic unsaved key), Value = folder path.
+        /// </summary>
+        public Dictionary<string, string> IfcFoldersByProject { get; set; }
             = new Dictionary<string, string>();
 
         // ── Serialization ──────────────────────────────────────────────────────
@@ -70,7 +102,14 @@ namespace IfcViewer.Viewer
                 {
                     string json = File.ReadAllText(SettingsPath);
                     var loaded = JsonConvert.DeserializeObject<ViewerSettings>(json);
-                    if (loaded != null) return loaded;
+                    if (loaded != null)
+                    {
+                        if (loaded.SavedRevit3DViews == null)
+                            loaded.SavedRevit3DViews = new Dictionary<string, string>();
+                        if (loaded.IfcFoldersByProject == null)
+                            loaded.IfcFoldersByProject = new Dictionary<string, string>();
+                        return loaded;
+                    }
                 }
             }
             catch (Exception ex)

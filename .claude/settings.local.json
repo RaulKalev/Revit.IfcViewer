@@ -87,7 +87,10 @@
       "Bash(git -C \"C:\\\\Users\\\\mibil\\\\Documents\\\\AntigravityGit\\\\IfcViewer\" add \"..\\\\..\\\\.claude\\\\projects\\\\C--Users-mibil-Documents-AntigravityGit-IfcViewer\\\\memory\\\\MEMORY.md\")",
       "Bash(git -C \"C:\\\\Users\\\\mibil\\\\Documents\\\\AntigravityGit\\\\IfcViewer\" status)",
       "Bash(git -C \"C:\\\\Users\\\\mibil\\\\Documents\\\\AntigravityGit\\\\IfcViewer\" log --oneline -10)",
-      "Bash(git -C \"C:\\\\Users\\\\mibil\\\\Documents\\\\AntigravityGit\\\\IfcViewer\" log --oneline origin/main -10)"
+      "Bash(git -C \"C:\\\\Users\\\\mibil\\\\Documents\\\\AntigravityGit\\\\IfcViewer\" log --oneline origin/main -10)",
+      "WebFetch(domain:docs.xbim.net)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(curl -s \"https://api.github.com/search/code?q=StyleLabel+repo:xBimTeam/XbimGeometry\" -H \"Accept: application/vnd.github.v3+json\")"
     ]
   }
 }

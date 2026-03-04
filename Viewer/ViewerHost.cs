@@ -114,29 +114,46 @@ namespace IfcViewer.Viewer
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
-            // ── Directional lights ──────────────────────────────────────────
-            // Sun: strong white from upper-left-front — primary key light.
-            var sunLight = new DirectionalLight3D
+            // ── Revit-style lighting ────────────────────────────────────────
+            // Four balanced directional lights from the cardinal quadrants ensure
+            // every face receives light regardless of orientation, while small
+            // intensity differences between lights give gentle face-to-face
+            // contrast so the model still reads clearly as 3D.
+            //
+            // Intensity breakdown (each as an RGB byte 0-255):
+            //   Key   (top-front-left):   180 — primary, slightly warm
+            //   Fill  (bottom-back-right): 90 — half the key, cool
+            //   Side  (top-right-front):  100 — quarter key, neutral
+            //   Back  (top-back):          70 — prevents silhouette from going black
+            //   Ambient: 140 (≈55%)       — generous base so nothing goes pitch-dark
+            var keyLight = new DirectionalLight3D
             {
-                Direction = new Media3D.Vector3D(-1, -2, -1.5),
-                Color = Colors.White
+                Direction = new Media3D.Vector3D(-0.5, -1, -0.5),
+                Color = System.Windows.Media.Color.FromRgb(180, 178, 175)
             };
-            // Fill: reduced to 40% of previous brightness so the sun↔shadow
-            // gradient is steeper; slight blue tint differentiates it from the sun.
             var fillLight = new DirectionalLight3D
             {
-                Direction = new Media3D.Vector3D(1, 1, 0.5),
-                Color = System.Windows.Media.Color.FromRgb(35, 35, 50)
+                Direction = new Media3D.Vector3D(0.5, 1, 0.5),
+                Color = System.Windows.Media.Color.FromRgb(90, 92, 98)
             };
-            // Ambient: lowered from 40 to 15 (≈6% of full range).
-            // With less ambient, surfaces pointing away from both lights are noticeably
-            // darker, giving strong face-to-face contrast and clear shape perception.
+            var sideLight = new DirectionalLight3D
+            {
+                Direction = new Media3D.Vector3D(-1, -0.3, 0.5),
+                Color = System.Windows.Media.Color.FromRgb(100, 100, 100)
+            };
+            var backLight = new DirectionalLight3D
+            {
+                Direction = new Media3D.Vector3D(0.3, -0.5, 1),
+                Color = System.Windows.Media.Color.FromRgb(70, 70, 70)
+            };
             var ambientLight = new AmbientLight3D
             {
-                Color = System.Windows.Media.Color.FromRgb(15, 15, 15)
+                Color = System.Windows.Media.Color.FromRgb(140, 140, 140)
             };
-            sceneGroup.Children.Add(sunLight);
+            sceneGroup.Children.Add(keyLight);
             sceneGroup.Children.Add(fillLight);
+            sceneGroup.Children.Add(sideLight);
+            sceneGroup.Children.Add(backLight);
             sceneGroup.Children.Add(ambientLight);
 
             // ── IFC / Revit root groups ──────────────────────────────────────

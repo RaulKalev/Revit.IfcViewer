@@ -109,12 +109,7 @@ namespace IfcViewer.UI
         private Color4               _selectedOriginalEmissive;
         private System.Windows.Point _selectionMouseDown;
 
-        // ── Always-on element outline ─────────────────────────────────────────
-        // Separate from _wireframeRoot (which the user toggles).
-        // Populated automatically whenever models load/unload via RebuildOutline().
-        // Uses a higher dihedral-angle threshold than the wireframe toggle so only
-        // the sharpest structural edges show — clean "outline" vs detailed wireframe.
-        private GroupModel3D _outlineRoot;
+
 
         // ── ViewCube compass ring ──────────────────────────────────────────────
         // WPF 2D overlay wrapped around the Helix built-in ViewCube.
@@ -377,10 +372,7 @@ namespace IfcViewer.UI
                 _wireframeRoot = new GroupModel3D();
                 _sceneRoot.Children.Add(_wireframeRoot);
 
-                // 5c. Always-on outline group — populated automatically whenever models
-                //     load/unload; not tied to the wireframe toggle.
-                _outlineRoot = new GroupModel3D();
-                _sceneRoot.Children.Add(_outlineRoot);
+                // 5c. Always-on outline removed — scene renders clean shaded meshes.
 
                 // 5d. ViewCube: apply Revit-style face texture and add compass ring.
                 _viewport.ViewCubeTexture = CreateRevitViewCubeTexture();
@@ -3116,51 +3108,9 @@ namespace IfcViewer.UI
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
-        // ── Always-on element outline ─────────────────────────────────────────
-        // Uses a higher dihedral-angle threshold (60°) than the wireframe toggle
-        // (30°) so only the sharpest structural silhouette edges show — giving a
-        // clean "outline" look rather than the detailed wireframe.
-        private void RebuildOutline()
-        {
-            if (_outlineRoot == null) return;
-            _outlineRoot.Children.Clear();
-
-            var meshList = new List<MeshGeometry3D>();
-            CollectMeshGeometries(_sceneRoot, meshList);
-
-            if (meshList.Count == 0) return;
-            SessionLogger.Info($"Outline — extracting silhouette edges from {meshList.Count} mesh(es).");
-
-            Task.Run(() =>
-            {
-                var lineGeoms = new List<LineGeometry3D>(meshList.Count);
-                foreach (var mg in meshList)
-                {
-                    var lg = WireframeHelper.ExtractHardEdges(mg, thresholdDegrees: 60f);
-                    if (lg != null) lineGeoms.Add(lg);
-                }
-                return lineGeoms;
-            }).ContinueWith(t =>
-            {
-                if (t.IsFaulted)
-                {
-                    SessionLogger.Error("Outline edge extraction failed.", t.Exception?.GetBaseException());
-                    return;
-                }
-
-                _outlineRoot.Children.Clear();
-                foreach (var lg in t.Result)
-                {
-                    _outlineRoot.Children.Add(new LineGeometryModel3D
-                    {
-                        Geometry  = lg,
-                        Color     = System.Windows.Media.Color.FromRgb(0x22, 0x22, 0x22),
-                        Thickness = 1.0,
-                    });
-                }
-                SessionLogger.Info($"Outline overlay: {t.Result.Count} line object(s).");
-            }, TaskScheduler.FromCurrentSynchronizationContext());
-        }
+        // ── Always-on element outline (disabled) ─────────────────────────────
+        // Outline overlay removed — the model renders as clean shaded geometry.
+        private void RebuildOutline() { }
 
         /// <summary>
         /// Recursively collects all <see cref="MeshGeometry3D"/> geometry objects from
@@ -3171,7 +3121,6 @@ namespace IfcViewer.UI
             foreach (var child in group.Children)
             {
                 if (ReferenceEquals(child, _wireframeRoot))           continue;
-                if (ReferenceEquals(child, _outlineRoot))             continue;
                 // Skip the section-plane quad — it is a 500 m helper mesh, not
                 // building geometry, and would produce a giant diagonal line.
                 if (_sectionMgr != null &&

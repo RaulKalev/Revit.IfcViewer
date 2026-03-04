@@ -240,6 +240,17 @@ namespace IfcCore
                                     };
                                     geometry[label] = gd;
                                 }
+                                else if (colour.IsTransparent && !gd.IsTransparent)
+                                {
+                                    // A transparent shape (e.g. glass pane) sharing the same
+                                    // product as an opaque shape (e.g. window frame) — adopt
+                                    // the transparent colour so the glass is visible.
+                                    gd.ColourR = colour.Red;
+                                    gd.ColourG = colour.Green;
+                                    gd.ColourB = colour.Blue;
+                                    gd.ColourA = colour.Alpha;
+                                    gd.IsTransparent = true;
+                                }
 
                                 // Append positions/normals/indices
                                 AppendGeometry(gd, triPositions, triIndices, toMetres);
@@ -411,6 +422,13 @@ namespace IfcCore
                                 float a = 1f;
                                 if (rendering.Transparency.HasValue)
                                     a = 1f - (float)rendering.Transparency.Value;
+                                // Prefer explicit DiffuseColour (IIfcColourRgb) when present —
+                                // it is the author-intended render colour.  SurfaceColour is
+                                // the base reflectance that DiffuseColour overrides.
+                                if (rendering.DiffuseColour is IIfcColourRgb diffuseRgb)
+                                    return new XbimColour("Style",
+                                        (float)diffuseRgb.Red, (float)diffuseRgb.Green,
+                                        (float)diffuseRgb.Blue, a);
                                 return new XbimColour("Style",
                                     (float)sc.Red, (float)sc.Green, (float)sc.Blue, a);
                             }

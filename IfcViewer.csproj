@@ -198,8 +198,4 @@
     </Compile>
   </ItemGroup>
 
-  <Target Name="SignBuild" AfterTargets="Build" Condition="('$(Configuration)' == 'Release2024' OR '$(Configuration)' == 'Release2026') AND '$(TargetPath)' != ''">
-    <Exec Command="&quot;C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe&quot; sign /f &quot;C:\Users\mibil\OneDrive\Desktop\RKToolsCert.pfx&quot; /p &quot;RaulKalev&quot; /tr http://timestamp.digicert.com /td SHA256 /fd SHA256 &quot;$(TargetPath)&quot;" />
-  </Target>
-
 </Project>

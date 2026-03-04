@@ -310,14 +310,15 @@ namespace IfcViewer.Ifc
                     Report($"Decoding geometry ({rawItems.Count} shapes)…");
 
                     // ── Phase 2: parallel decode + transform ─────────────────
-                    // Each thread gets its own Dictionary<int, Bucket> keyed by productLabel,
-                    // so there is no shared state and no locking needed.
-                    var threadLocalBuckets = new ConcurrentBag<Dictionary<int, Bucket>>();
+                    // Each thread gets its own Dictionary keyed by (productLabel, colour)
+                    // so shapes with different colours on the same product (e.g. glass pane
+                    // vs window frame) end up in separate buckets and keep their own colour.
+                    var threadLocalBuckets = new ConcurrentBag<Dictionary<(int, ColourKey), Bucket>>();
                     int shapeCount = 0;
 
                     Parallel.ForEach(
                         rawItems,
-                        () => new Dictionary<int, Bucket>(),          // thread-local init
+                        () => new Dictionary<(int, ColourKey), Bucket>(),          // thread-local init
                         (item, state, localBuckets) =>
                         {
                             List<float[]> triPositions;
@@ -342,11 +343,13 @@ namespace IfcViewer.Ifc
                             if (triPositions == null || triPositions.Count == 0)
                             { Interlocked.Increment(ref diagEmpty); return localBuckets; }
 
-                            // Group by product label — each element gets its own bucket
-                            if (!localBuckets.TryGetValue(item.ProductLabel, out Bucket bucket))
+                            // Key by (productLabel, colour) — shapes of the same product
+                            // but different colours (e.g. glass vs frame) go to separate buckets.
+                            var key = (item.ProductLabel, item.ColourKey);
+                            if (!localBuckets.TryGetValue(key, out Bucket bucket))
                             {
                                 bucket = new Bucket(item.IsTransparent, item.ColourKey);
-                                localBuckets[item.ProductLabel] = bucket;
+                                localBuckets[key] = bucket;
                             }
 
                             int baseIdx = bucket.Positions.Count;
@@ -370,15 +373,16 @@ namespace IfcViewer.Ifc
                     );
 
                     // ── Phase 3: merge thread-local buckets ──────────────────
-                    var buckets = new Dictionary<int, Bucket>();
+                    // Key is (productLabel, colour) — same as Phase 2.
+                    var mergedBuckets = new Dictionary<(int, ColourKey), Bucket>();
                     foreach (var localBuckets in threadLocalBuckets)
                     {
                         foreach (var kv in localBuckets)
                         {
-                            if (!buckets.TryGetValue(kv.Key, out Bucket master))
+                            if (!mergedBuckets.TryGetValue(kv.Key, out Bucket master))
                             {
                                 master = new Bucket(kv.Value.IsTransparent, kv.Value.Colour);
-                                buckets[kv.Key] = master;
+                                mergedBuckets[kv.Key] = master;
                             }
 
                             int offset = master.Positions.Count;
@@ -388,6 +392,28 @@ namespace IfcViewer.Ifc
                                 master.Indices.Add(offset + idx);
                         }
                     }
+
+                    // Build per-product (int-keyed) buckets for wall-merge, opening-cut,
+                    // and cache — these functions analyse geometry by product and do not
+                    // need to distinguish colour sub-buckets within a product.
+                    var buckets = new Dictionary<int, Bucket>();
+                    var originalVerts = new Dictionary<int, int>();
+                    foreach (var kv in mergedBuckets)
+                    {
+                        int label = kv.Key.Item1;
+                        if (!buckets.TryGetValue(label, out Bucket rep))
+                        {
+                            rep = new Bucket(kv.Value.IsTransparent, kv.Value.Colour);
+                            buckets[label] = rep;
+                        }
+                        int off = rep.Positions.Count;
+                        rep.Positions.AddRange(kv.Value.Positions);
+                        rep.Normals.AddRange(kv.Value.Normals);
+                        foreach (int idx in kv.Value.Indices)
+                            rep.Indices.Add(off + idx);
+                    }
+                    foreach (var kv in buckets)
+                        originalVerts[kv.Key] = kv.Value.Positions.Count;
 
                     int mergedWallLayersByRelations = CollapseWallLayersByRelationGroups(
                         buckets,
@@ -408,6 +434,40 @@ namespace IfcViewer.Ifc
                         buckets, elementInfos, layeredOpeningVolumes,
                         wallLayerRelationGroups);
 
+                    // Propagate wall-merge removals and opening cuts back to mergedBuckets.
+                    var obsoleteKeys = new List<(int, ColourKey)>();
+                    var modifiedLabels = new List<int>();
+
+                    // 1. Find completely deleted products (e.g. wall absorbed in a merge)
+                    foreach (var mk in mergedBuckets.Keys)
+                        if (!buckets.ContainsKey(mk.Item1))
+                            obsoleteKeys.Add(mk);
+
+                    // 2. Find modified products (e.g. wall cut by an opening or merged into).
+                    // If a product's geometry changed, its vertex count will differ.
+                    foreach (var kv in buckets)
+                    {
+                        if (originalVerts.TryGetValue(kv.Key, out int orig) && orig != kv.Value.Positions.Count)
+                        {
+                            modifiedLabels.Add(kv.Key);
+                            foreach (var mk in mergedBuckets.Keys)
+                                if (mk.Item1 == kv.Key && !obsoleteKeys.Contains(mk))
+                                    obsoleteKeys.Add(mk);
+                        }
+                    }
+
+                    // Remove stale sub-buckets for modified or deleted products
+                    foreach (var mk in obsoleteKeys)
+                        mergedBuckets.Remove(mk);
+
+                    // Insert the freshly computed combined boolean geometry
+                    foreach (int label in modifiedLabels)
+                    {
+                        Bucket mod = buckets[label];
+                        if (mod.Indices.Count > 0)
+                            mergedBuckets[(label, mod.Colour)] = mod;
+                    }
+
                     int elementCount = buckets.Count;
                     sw.Stop();
                     SessionLogger.Info(
@@ -419,14 +479,17 @@ namespace IfcViewer.Ifc
                         $"openings={openingVolumes.Count} layeredOpenings={layeredOpeningVolumes.Count} layeredCuts={cutWallCount} " +
                         $"shapes={shapeCount} elements={elementCount}");
 
-                    Report($"Building viewport scene ({elementCount} elements)…");
+                    Report($"Building viewport scene ({elementCount} elements)\u2026");
 
                     // Persist processed geometry so subsequent opens use the fast path.
-                    TrySaveCacheAsync(filePath, buckets, elementInfos);
+                    TrySaveCacheAsync(filePath, mergedBuckets, elementInfos);
 
-                    // ── Build Helix scene objects on the UI thread ───────────
-                    return BuildSceneProgressive(filePath, buckets, elementInfos,
+                    // Use mergedBuckets (keyed by product+colour) so each colour sub-shape
+                    // gets its own mesh with the correct material.
+                    return BuildSceneProgressive(filePath, mergedBuckets, elementInfos,
                                                  elementCount, uiDispatcher, Report);
+
+
                 }
             }
             finally
@@ -438,11 +501,13 @@ namespace IfcViewer.Ifc
         /// <summary>
         /// Build the Helix scene progressively — dispatch each element as a separate
         /// BeginInvoke so geometry appears in the viewport incrementally.
-        /// Creates one MeshGeometryModel3D per IFC product (element) to enable hit-testing.
+        /// Creates one MeshGeometryModel3D per distinct (product, colour) pair so that
+        /// sub-shapes with different colours (e.g. glass vs frame) each keep their own
+        /// material while still mapping to the same element info for click-selection.
         /// </summary>
         private static IfcModel BuildSceneProgressive(
             string filePath,
-            Dictionary<int, Bucket> elementBuckets,
+            Dictionary<(int productLabel, ColourKey colour), Bucket> elementBuckets,
             Dictionary<int, IfcElementInfo> elementInfos,
             int elementCount,
             Dispatcher uiDispatcher,
@@ -454,10 +519,9 @@ namespace IfcViewer.Ifc
             var elementMap = new Dictionary<MeshGeometryModel3D, IfcElementInfo>();
             int triCount   = 0;
 
-            var bucketList = elementBuckets.ToList();
-            foreach (var kv in bucketList)
+            foreach (var kv in elementBuckets)
             {
-                int    productLabel    = kv.Key;
+                int    productLabel    = kv.Key.productLabel;
                 Bucket bucket          = kv.Value;
                 if (bucket.Indices.Count == 0) continue;
 
@@ -532,7 +596,7 @@ namespace IfcViewer.Ifc
         // different name → automatic miss.  Bumping CacheFormatVersion forces a
         // rebuild of all caches regardless of timestamps.
         // ─────────────────────────────────────────────────────────────────────
-        private const int CacheFormatVersion = 7;
+        private const int CacheFormatVersion = 8;
         private static readonly byte[] CacheMagic
             = System.Text.Encoding.ASCII.GetBytes("IFCVC");
 
@@ -597,7 +661,7 @@ namespace IfcViewer.Ifc
         /// </summary>
         private static bool TryLoadCache(
             string ifcFilePath,
-            out Dictionary<int, Bucket> buckets,
+            out Dictionary<(int, ColourKey), Bucket> buckets,
             out Dictionary<int, IfcElementInfo> elementInfos)
         {
             buckets      = null;
@@ -618,7 +682,7 @@ namespace IfcViewer.Ifc
 
                     // ── Geometry ────────────────────────────────────────────
                     int elementCount = br.ReadInt32();
-                    buckets = new Dictionary<int, Bucket>(elementCount);
+                    buckets = new Dictionary<(int, ColourKey), Bucket>(elementCount);
 
                     for (int e = 0; e < elementCount; e++)
                     {
@@ -627,7 +691,8 @@ namespace IfcViewer.Ifc
                               b = br.ReadSingle(), a = br.ReadSingle();
                         bool  transparent = br.ReadBoolean();
 
-                        var bucket = new Bucket(transparent, new ColourKey(r, g, b, a));
+                        var colour = new ColourKey(r, g, b, a);
+                        var bucket = new Bucket(transparent, colour);
 
                         int posCount = br.ReadInt32();
                         bucket.Positions.Capacity = posCount;
@@ -644,7 +709,7 @@ namespace IfcViewer.Ifc
                         for (int i = 0; i < idxCount; i++)
                             bucket.Indices.Add(br.ReadInt32());
 
-                        buckets[label] = bucket;
+                        buckets[(label, colour)] = bucket;
                     }
 
                     // ── Element infos ────────────────────────────────────────
@@ -693,7 +758,7 @@ namespace IfcViewer.Ifc
         /// </summary>
         private static void TrySaveCacheAsync(
             string ifcFilePath,
-            Dictionary<int, Bucket> buckets,
+            Dictionary<(int, ColourKey), Bucket> buckets,
             Dictionary<int, IfcElementInfo> elementInfos)
         {
             // Compute target path on the caller thread (cheap + avoids race with
@@ -728,7 +793,7 @@ namespace IfcViewer.Ifc
                         bw.Write(buckets.Count);
                         foreach (var kv in buckets)
                         {
-                            bw.Write(kv.Key);
+                            bw.Write(kv.Key.Item1);
                             Color4 c = kv.Value.Colour.ToColor4();
                             bw.Write(c.Red); bw.Write(c.Green);
                             bw.Write(c.Blue); bw.Write(c.Alpha);
@@ -2324,8 +2389,8 @@ namespace IfcViewer.Ifc
             public readonly List<Vector3> Positions = new List<Vector3>();
             public readonly List<Vector3> Normals   = new List<Vector3>();
             public readonly List<int>     Indices   = new List<int>();
-            public readonly bool          IsTransparent;
-            public readonly ColourKey     Colour;
+            public bool          IsTransparent;
+            public ColourKey     Colour;
             public Bucket(bool transparent, ColourKey colour)
             {
                 IsTransparent = transparent;

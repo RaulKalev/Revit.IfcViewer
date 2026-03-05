@@ -309,26 +309,35 @@ namespace IfcViewer.Viewer
             if (!_enabled) return;
 
             // Build a rotation that brings the quad's Y-up normal to align with -_normal.
+            var yUp = new SharpDX.Vector3(0, 1, 0);
             var n = -_normal;
             n.Normalize();
 
-            // Find an arbitrary tangent to form a basis
-            var t1 = System.Math.Abs(n.X) > 0.9f
-                ? new SharpDX.Vector3(0, 1, 0)
-                : new SharpDX.Vector3(1, 0, 0);
-            var tangent = SharpDX.Vector3.Normalize(SharpDX.Vector3.Cross(t1, n));
-            var biTangent = SharpDX.Vector3.Cross(n, tangent);
+            var cross = SharpDX.Vector3.Cross(yUp, n);
+            double angle;
+            Media3D.Vector3D axis;
 
-            // Construct rotation matrix using WPF Media3D.
-            // BuildQuad creates the quad on the XZ plane, so its normal is Y-up (0,1,0).
-            // We map X -> tangent, Y -> n, Z -> biTangent.
-            var m = new Media3D.Matrix3D(
-                tangent.X, tangent.Y, tangent.Z, 0,
-                n.X, n.Y, n.Z, 0,
-                biTangent.X, biTangent.Y, biTangent.Z, 0,
-                _pointOnPlane.X, _pointOnPlane.Y, _pointOnPlane.Z, 1);
+            if (cross.LengthSquared() < 1e-6f)
+            {
+                // Parallel or anti-parallel to Y
+                axis  = new Media3D.Vector3D(1, 0, 0);
+                angle = SharpDX.Vector3.Dot(yUp, n) > 0 ? 0 : 180;
+            }
+            else
+            {
+                axis  = new Media3D.Vector3D(cross.X, cross.Y, cross.Z);
+                angle = System.Math.Acos(
+                    System.Math.Max(-1.0, System.Math.Min(1.0,
+                        SharpDX.Vector3.Dot(yUp, n)))) * (180.0 / System.Math.PI);
+            }
 
-            _planeVisual.Transform = new Media3D.MatrixTransform3D(m);
+            var xform = new Media3D.Transform3DGroup();
+            xform.Children.Add(new Media3D.RotateTransform3D(
+                new Media3D.AxisAngleRotation3D(axis, angle)));
+            xform.Children.Add(new Media3D.TranslateTransform3D(
+                _pointOnPlane.X, _pointOnPlane.Y, _pointOnPlane.Z));
+
+            _planeVisual.Transform = xform;
         }
 
         // ── Geometry helpers ──────────────────────────────────────────────────

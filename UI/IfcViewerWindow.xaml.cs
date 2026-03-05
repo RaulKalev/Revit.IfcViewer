@@ -108,6 +108,7 @@ namespace IfcViewer.UI
         private MeshGeometryModel3D  _selectedMesh;
         private Color4               _selectedOriginalEmissive;
         private System.Windows.Point _selectionMouseDown;
+        private readonly Stack<MeshGeometryModel3D> _hiddenMeshes = new Stack<MeshGeometryModel3D>();
 
 
 
@@ -400,7 +401,7 @@ namespace IfcViewer.UI
                 // camera to move even in normal orbit mode.
                 this.PreviewKeyDown += (s, ev) =>
                 {
-                    if (ev.Key == Key.Space && TryHideSelectedMesh())
+                    if (ev.Key == Key.Space && TryHandleSpacebar())
                     {
                         ev.Handled = true;
                         return;
@@ -492,6 +493,7 @@ namespace IfcViewer.UI
                 // Clear selection state so no stale material references remain.
                 _selectedMesh = null;
                 _ifcElementMap.Clear();
+                _hiddenMeshes.Clear();
                 _revitElementMap.Clear();
                 _ifcGuidMeshMap.Clear();
                 _ifcCatalogItems.Clear();
@@ -939,6 +941,14 @@ namespace IfcViewer.UI
 
             foreach (var mesh in selected.ElementMap.Keys)
                 _ifcElementMap.Remove(mesh);
+
+            if (_hiddenMeshes.Count > 0)
+            {
+                var kept = _hiddenMeshes.Where(m => !selected.ElementMap.ContainsKey(m)).ToList();
+                _hiddenMeshes.Clear();
+                for (int i = kept.Count - 1; i >= 0; i--)
+                    _hiddenMeshes.Push(kept[i]);
+            }
             RebuildIfcGuidMap();
 
             _sectionMgr?.UnregisterGroup(selected.SceneGroup);
@@ -1117,21 +1127,42 @@ namespace IfcViewer.UI
             _pendingReload = null;
         }
 
-        private bool TryHideSelectedMesh()
+        private bool TryHandleSpacebar()
         {
-            if (_selectedMesh == null) return false;
+            if (_selectedMesh != null)
+            {
+                _hiddenMeshes.Push(_selectedMesh);
+                _selectedMesh.Visibility = Visibility.Collapsed;
+                ClearSelection();
 
-            _selectedMesh.Visibility = Visibility.Collapsed;
-            ClearSelection();
+                // Rebuild wireframe/outline from visible meshes only — the hidden mesh's
+                // lines must not linger after the mesh itself disappears.
+                RebuildOutline();
+                if (WireframeToggle?.IsChecked == true)
+                    RebuildWireframe();
 
-            // Rebuild wireframe/outline from visible meshes only — the hidden mesh's
-            // lines must not linger after the mesh itself disappears.
-            RebuildOutline();
-            if (WireframeToggle?.IsChecked == true)
-                RebuildWireframe();
+                SessionLogger.Info("Hidden selected element.");
+                return true;
+            }
+            else if (_hiddenMeshes.Count > 0)
+            {
+                var mesh = _hiddenMeshes.Pop();
+                mesh.Visibility = Visibility.Visible;
+                
+                if (_ifcElementMap.TryGetValue(mesh, out IfcElementInfo ifcInfo))
+                    SelectElement(mesh, ifcInfo);
+                else if (_revitElementMap.TryGetValue(mesh, out RevitElementInfo revitInfo))
+                    SelectElement(mesh, revitInfo);
 
-            SessionLogger.Info("Hidden selected element.");
-            return true;
+                RebuildOutline();
+                if (WireframeToggle?.IsChecked == true)
+                    RebuildWireframe();
+
+                SessionLogger.Info("Unhidden last element.");
+                return true;
+            }
+
+            return false;
         }
 
         // ── Element selection ─────────────────────────────────────────────────

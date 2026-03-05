@@ -859,7 +859,7 @@ namespace IfcViewer.UI
             if (WireframeToggle?.IsChecked == true)
                 RebuildWireframe();
 
-            UpdateSectionBounds();
+
 
             if (_loadedModels.Count == 1 && _revitModel == null)
                 _viewerHost.FitView(ifcModel.Bounds);
@@ -962,7 +962,7 @@ namespace IfcViewer.UI
             RebuildOutline();
             if (WireframeToggle?.IsChecked == true)
                 RebuildWireframe();
-            UpdateSectionBounds();
+
 
             if (updateStatus)
             {
@@ -1063,7 +1063,7 @@ namespace IfcViewer.UI
 
             _revitModel = model;
             _sectionMgr?.RegisterGroup(_revitModel.SceneGroup);
-            UpdateSectionBounds();
+
 
             // Rebuild the mesh → info reverse-map for hit-testing.
             // If the currently selected mesh was a Revit element that no longer
@@ -3286,78 +3286,66 @@ namespace IfcViewer.UI
         {
             if (_sectionMgr == null) return;
             _sectionMgr.Enabled = true;
-            SessionLogger.Info("Section plane enabled.");
+            if (_viewport != null)
+                _viewport.PreviewMouseRightButtonUp += SectionPlane_FacePick;
+            UpdateStatus("Section plane: right-click a face to set the cut plane.");
+            SessionLogger.Info("Section plane enabled — awaiting face pick.");
         }
 
         private void SectionPlane_Unchecked(object sender, RoutedEventArgs e)
         {
             if (_sectionMgr == null) return;
             _sectionMgr.Enabled = false;
+            if (_viewport != null)
+                _viewport.PreviewMouseRightButtonUp -= SectionPlane_FacePick;
+            UpdateStatus("Section plane disabled.");
             SessionLogger.Info("Section plane disabled.");
         }
 
-        private void SectionAxis_Changed(object sender, RoutedEventArgs e)
-        {
-            if (_sectionMgr == null) return;
-            if (SectionAxisX?.IsChecked == true)      _sectionMgr.Axis = SectionAxis.X;
-            else if (SectionAxisY?.IsChecked == true) _sectionMgr.Axis = SectionAxis.Y;
-            else                                      _sectionMgr.Axis = SectionAxis.Z;
-
-            // Re-centre slider range on the new axis
-            UpdateSectionBounds();
-        }
-
-        private void SectionOffset_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
-        {
-            if (_sectionMgr == null) return;
-            _sectionMgr.Offset = (float)e.NewValue;
-            if (SectionOffsetLabel != null)
-                SectionOffsetLabel.Text = e.NewValue.ToString("F2");
-        }
-
         /// <summary>
-        /// Recalculate the section slider min/max from the combined scene bounding box
-        /// so the slider always covers the full extent of loaded geometry.
+        /// Right-click pick handler — active only while the section plane toggle is on.
+        /// Derives the cut plane from the face normal and hit point of the picked face.
         /// </summary>
-        private void UpdateSectionBounds()
+        private void SectionPlane_FacePick(object sender, MouseButtonEventArgs e)
         {
-            if (_sectionMgr == null || SectionOffsetSlider == null) return;
+            if (_sectionMgr == null) return;
 
-            // Collect all known bounds
-            float min = float.MaxValue, max = float.MinValue;
+            var pos  = e.GetPosition(_viewport);
+            var hits = _viewport?.FindHits(pos);
+            if (hits == null || hits.Count == 0) return;
 
-            foreach (var m in _loadedModels)
+            foreach (var hit in hits)
             {
-                var b = m.Bounds;
-                if (b.Maximum == b.Minimum) continue;
-                UpdateMinMax(b, ref min, ref max);
+                var mesh = hit.ModelHit as MeshGeometryModel3D;
+                if (mesh == null) continue;
+
+                // Skip the plane-visual quad itself
+                if (_sectionMgr.PlaneVisual != null &&
+                    ReferenceEquals(mesh, _sectionMgr.PlaneVisual)) continue;
+
+                // NormalAtHit gives the interpolated face normal at the hit point.
+                // Normalise defensively; skip hits with zero-length normals.
+                var rawNormal = hit.NormalAtHit;
+                var faceNormal = new SharpDX.Vector3(
+                    (float)rawNormal.X, (float)rawNormal.Y, (float)rawNormal.Z);
+                if (faceNormal.LengthSquared() < 1e-6f) continue;
+                faceNormal = SharpDX.Vector3.Normalize(faceNormal);
+
+                // PointHit is already in world space for HelixToolkit SharpDX.
+                var hitPt = new SharpDX.Vector3(
+                    (float)hit.PointHit.X,
+                    (float)hit.PointHit.Y,
+                    (float)hit.PointHit.Z);
+
+                _sectionMgr.SetPlane(faceNormal, hitPt);
+
+                UpdateStatus($"Section plane set — normal ({faceNormal.X:F2}, {faceNormal.Y:F2}, {faceNormal.Z:F2}).");
+                SessionLogger.Info($"Section plane set from face pick — normal {faceNormal}.");
+
+                // Prevent Helix from treating this right-click as a camera orbit start.
+                e.Handled = true;
+                return;
             }
-            if (_revitModel != null)
-            {
-                var b = _revitModel.Bounds;
-                if (b.Maximum != b.Minimum)
-                    UpdateMinMax(b, ref min, ref max);
-            }
-
-            if (min > max) { min = -50; max = 50; }
-
-            // Add 10% padding
-            float pad = Math.Max((max - min) * 0.1f, 1f);
-            min -= pad; max += pad;
-
-            _sectionMgr.MinBound = min;
-            _sectionMgr.MaxBound = max;
-
-            SectionOffsetSlider.Minimum = min;
-            SectionOffsetSlider.Maximum = max;
-        }
-
-        private static void UpdateMinMax(SharpDX.BoundingBox b, ref float min, ref float max)
-        {
-            // Choose the relevant component based on current axis selection would be ideal,
-            // but using the full extents keeps this simple and always correct.
-            min = Math.Min(min, Math.Min(b.Minimum.X, Math.Min(b.Minimum.Y, b.Minimum.Z)));
-            max = Math.Max(max, Math.Max(b.Maximum.X, Math.Max(b.Maximum.Y, b.Maximum.Z)));
         }
 
         // ── Settings ──────────────────────────────────────────────────────────

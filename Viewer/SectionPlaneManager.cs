@@ -308,27 +308,32 @@ namespace IfcViewer.Viewer
 
             if (!_enabled) return;
 
-            // Build a rotation that brings the quad's Y-up normal to align with -_normal.
-            var yUp = new SharpDX.Vector3(0, 1, 0);
-            var n = -_normal;
+            // Build a rotation that brings the quad's Y-up normal (0,1,0) to align with _normal.
+            // We want the primary face of the quad to point OUT of the wall (along _normal)
+            // so it gets lit by the scene lights. (We reversed the clipping plane d-value elsewhere).
+            var n = _normal;
             n.Normalize();
 
-            var cross = SharpDX.Vector3.Cross(yUp, n);
-            double angle;
+            var yUpVec = new Media3D.Vector3D(0, 1, 0);
+            var targetVec = new Media3D.Vector3D(n.X, n.Y, n.Z);
+
+            double angle = Media3D.Vector3D.AngleBetween(yUpVec, targetVec);
             Media3D.Vector3D axis;
 
-            if (cross.LengthSquared() < 1e-6f)
+            if (angle < 0.1)
             {
-                // Parallel or anti-parallel to Y
-                axis  = new Media3D.Vector3D(1, 0, 0);
-                angle = SharpDX.Vector3.Dot(yUp, n) > 0 ? 0 : 180;
+                axis = new Media3D.Vector3D(1, 0, 0);
+                angle = 0;
+            }
+            else if (angle > 179.9)
+            {
+                axis = new Media3D.Vector3D(1, 0, 0);
+                angle = 180;
             }
             else
             {
-                axis  = new Media3D.Vector3D(cross.X, cross.Y, cross.Z);
-                angle = System.Math.Acos(
-                    System.Math.Max(-1.0, System.Math.Min(1.0,
-                        SharpDX.Vector3.Dot(yUp, n)))) * (180.0 / System.Math.PI);
+                axis = Media3D.Vector3D.CrossProduct(yUpVec, targetVec);
+                axis.Normalize();
             }
 
             var xform = new Media3D.Transform3DGroup();

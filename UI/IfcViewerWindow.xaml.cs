@@ -1167,6 +1167,26 @@ namespace IfcViewer.UI
 
         // ── Element selection ─────────────────────────────────────────────────
 
+        private void UnhideAll_Click(object sender, RoutedEventArgs e)
+        {
+            if (_hiddenMeshes.Count == 0) return;
+
+            while (_hiddenMeshes.Count > 0)
+            {
+                var mesh = _hiddenMeshes.Pop();
+                mesh.Visibility = Visibility.Visible;
+            }
+
+            RebuildOutline();
+            if (WireframeToggle?.IsChecked == true)
+                RebuildWireframe();
+
+            SessionLogger.Info("Unhid all hidden elements.");
+        }
+
+        // ── Element selection ─────────────────────────────────────────────────
+
+
         private void Viewport_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
             // Record the down position so MouseLeftButtonUp can distinguish a click

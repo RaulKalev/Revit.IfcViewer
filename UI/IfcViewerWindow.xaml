@@ -204,9 +204,17 @@
                         <Button x:Name="SettingsButton"
                                 Click="Settings_Click"
                                 Style="{StaticResource CustomActionButtonStyle}"
-                                Width="32" Height="32" Margin="0,0,0,0"
+                                Width="32" Height="32" Margin="0,0,6,0"
                                 ToolTip="Viewer settings">
                             <materialDesign:PackIcon Kind="Cog" Width="20" Height="20"/>
+                        </Button>
+                        <Separator Width="1" Margin="4,4" Background="{DynamicResource BorderBrush}"/>
+                        <Button x:Name="UnhideAllButton"
+                                Click="UnhideAll_Click"
+                                Style="{StaticResource CustomActionButtonStyle}"
+                                Width="32" Height="32" Margin="0,0,0,0"
+                                ToolTip="Unhide all hidden elements">
+                            <materialDesign:PackIcon Kind="Eye" Width="20" Height="20"/>
                         </Button>
                     </StackPanel>
                 </Border>

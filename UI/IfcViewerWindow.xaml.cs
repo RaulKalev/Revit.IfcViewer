@@ -3325,11 +3325,12 @@ namespace IfcViewer.UI
                 if (_sectionMgr.PlaneVisual != null &&
                     ReferenceEquals(mesh, _sectionMgr.PlaneVisual)) continue;
 
-                // NormalAtHit gives the interpolated face normal at the hit point.
-                // Normalise defensively; skip hits with zero-length normals.
+                // NormalAtHit points out of the face. We want the section plane to cut INTO
+                // the object, so we must reverse the normal so the half-space subtracted
+                // is the volume behind the clicked face.
                 var rawNormal = hit.NormalAtHit;
                 var faceNormal = new SharpDX.Vector3(
-                    (float)rawNormal.X, (float)rawNormal.Y, (float)rawNormal.Z);
+                    (float)-rawNormal.X, (float)-rawNormal.Y, (float)-rawNormal.Z);
                 if (faceNormal.LengthSquared() < 1e-6f) continue;
                 faceNormal = SharpDX.Vector3.Normalize(faceNormal);
 

@@ -308,10 +308,11 @@ namespace IfcViewer.Viewer
 
             if (!_enabled) return;
 
-            // Build a rotation that brings the quad's Y-up normal to align with _normal.
-            // The base quad lies in the XZ plane with Y = up (see BuildQuad).
+            // Build a rotation that brings the quad's Y-up normal to align with -_normal.
+            // (We inverted _normal to cut into the building, so -_normal points back OUT
+            // towards the camera, meaning the front face of the quad will be properly lit).
             var yUp   = new Vector3(0, 1, 0);
-            var n     = _normal;
+            var n     = -_normal;
             var cross = Vector3.Cross(yUp, n);
             double angle;
             Media3D.Vector3D axis;

@@ -3339,6 +3339,10 @@ namespace IfcViewer.UI
                     (float)hit.PointHit.X,
                     (float)hit.PointHit.Y,
                     (float)hit.PointHit.Z);
+                    
+                // Offset the plane slightly outward along the original (un-inverted) face normal 
+                // to prevent intense Z-buffer fighting between the visual quad and the newly cut edge.
+                hitPt += rawNormal * 0.05f;
 
                 _sectionMgr.SetPlane(faceNormal, hitPt);
                 _sectionMgr.Enabled = true;  // activate/update after plane is defined

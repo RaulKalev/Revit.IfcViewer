@@ -93,10 +93,10 @@ namespace IfcViewer.Viewer
 
             var mat = new PhongMaterial
             {
-                DiffuseColor      = new Color4(0.20f, 0.55f, 1.00f, 0.30f),
-                AmbientColor      = new Color4(0.10f, 0.30f, 0.60f, 0.15f),
-                SpecularColor     = new Color4(0f, 0f, 0f, 0f),
-                SpecularShininess = 1f,
+                DiffuseColor      = new Color4(1.00f, 0.00f, 1.00f, 0.80f), // Bright magenta, mostly opaque
+                AmbientColor      = new Color4(0.50f, 0.00f, 0.50f, 0.80f),
+                SpecularColor     = new Color4(1f, 1f, 1f, 1f),
+                SpecularShininess = 10f,
             };
 
             _planeVisual = new MeshGeometryModel3D
@@ -104,7 +104,7 @@ namespace IfcViewer.Viewer
                 Geometry      = mesh,
                 Material      = mat,
                 IsTransparent = true,
-                DepthBias     = -100,
+                CullMode      = SharpDX.Direct3D11.CullMode.None // Make it double-sided
             };
 
             parent.Children.Add(_planeVisual);
@@ -308,36 +308,25 @@ namespace IfcViewer.Viewer
 
             if (!_enabled) return;
 
-            // Build a rotation that brings the quad's Y-up normal to align with -_normal.
-            // (We inverted _normal to cut into the building, so -_normal points back OUT
-            // towards the camera, meaning the front face of the quad will be properly lit).
-            var yUp   = new Vector3(0, 1, 0);
-            var n     = -_normal;
-            var cross = Vector3.Cross(yUp, n);
-            double angle;
-            Media3D.Vector3D axis;
+            // Build a rotation that brings the quad's Z-up normal to align with -_normal.
+            var n = -_normal;
+            n.Normalize();
 
-            if (cross.LengthSquared() < 1e-6f)
-            {
-                // Parallel or anti-parallel to Y
-                axis  = new Media3D.Vector3D(1, 0, 0);
-                angle = Vector3.Dot(yUp, n) > 0 ? 0 : 180;
-            }
-            else
-            {
-                axis  = new Media3D.Vector3D(cross.X, cross.Y, cross.Z);
-                angle = System.Math.Acos(
-                    System.Math.Max(-1.0, System.Math.Min(1.0,
-                        Vector3.Dot(yUp, n)))) * (180.0 / System.Math.PI);
-            }
+            // Find an arbitrary tangent to form a basis
+            var t1 = System.Math.Abs(n.X) > 0.9f
+                ? new Vector3(0, 1, 0)
+                : new Vector3(1, 0, 0);
+            var tangent = Vector3.Normalize(Vector3.Cross(t1, n));
+            var biTangent = Vector3.Cross(n, tangent);
 
-            var xform = new Media3D.Transform3DGroup();
-            xform.Children.Add(new Media3D.RotateTransform3D(
-                new Media3D.AxisAngleRotation3D(axis, angle)));
-            xform.Children.Add(new Media3D.TranslateTransform3D(
-                _pointOnPlane.X, _pointOnPlane.Y, _pointOnPlane.Z));
+            // Construct rotation matrix using WPF Media3D
+            var m = new Media3D.Matrix3D(
+                tangent.X, tangent.Y, tangent.Z, 0,
+                biTangent.X, biTangent.Y, biTangent.Z, 0,
+                n.X, n.Y, n.Z, 0,
+                _pointOnPlane.X, _pointOnPlane.Y, _pointOnPlane.Z, 1);
 
-            _planeVisual.Transform = xform;
+            _planeVisual.Transform = new Media3D.MatrixTransform3D(m);
         }
 
         // ── Geometry helpers ──────────────────────────────────────────────────

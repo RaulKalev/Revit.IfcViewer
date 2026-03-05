@@ -3285,11 +3285,11 @@ namespace IfcViewer.UI
         private void SectionPlane_Checked(object sender, RoutedEventArgs e)
         {
             if (_sectionMgr == null) return;
-            _sectionMgr.Enabled = true;
+            // Do NOT enable the plane yet — wait for the user to pick a face.
             if (_viewport != null)
                 _viewport.PreviewMouseRightButtonUp += SectionPlane_FacePick;
             UpdateStatus("Section plane: right-click a face to set the cut plane.");
-            SessionLogger.Info("Section plane enabled — awaiting face pick.");
+            SessionLogger.Info("Section plane mode entered — awaiting face pick.");
         }
 
         private void SectionPlane_Unchecked(object sender, RoutedEventArgs e)
@@ -3313,6 +3313,8 @@ namespace IfcViewer.UI
             var pos  = e.GetPosition(_viewport);
             var hits = _viewport?.FindHits(pos);
             if (hits == null || hits.Count == 0) return;
+
+            // Enable the plane on the first successful pick (EnablePlane after SetPlane).
 
             foreach (var hit in hits)
             {
@@ -3338,6 +3340,7 @@ namespace IfcViewer.UI
                     (float)hit.PointHit.Z);
 
                 _sectionMgr.SetPlane(faceNormal, hitPt);
+                _sectionMgr.Enabled = true;  // activate/update after plane is defined
 
                 UpdateStatus($"Section plane set — normal ({faceNormal.X:F2}, {faceNormal.Y:F2}, {faceNormal.Z:F2}).");
                 SessionLogger.Info($"Section plane set from face pick — normal {faceNormal}.");

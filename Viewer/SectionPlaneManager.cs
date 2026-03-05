@@ -308,22 +308,24 @@ namespace IfcViewer.Viewer
 
             if (!_enabled) return;
 
-            // Build a rotation that brings the quad's Z-up normal to align with -_normal.
+            // Build a rotation that brings the quad's Y-up normal to align with -_normal.
             var n = -_normal;
             n.Normalize();
 
             // Find an arbitrary tangent to form a basis
             var t1 = System.Math.Abs(n.X) > 0.9f
-                ? new Vector3(0, 1, 0)
-                : new Vector3(1, 0, 0);
-            var tangent = Vector3.Normalize(Vector3.Cross(t1, n));
-            var biTangent = Vector3.Cross(n, tangent);
+                ? new SharpDX.Vector3(0, 1, 0)
+                : new SharpDX.Vector3(1, 0, 0);
+            var tangent = SharpDX.Vector3.Normalize(SharpDX.Vector3.Cross(t1, n));
+            var biTangent = SharpDX.Vector3.Cross(n, tangent);
 
-            // Construct rotation matrix using WPF Media3D
+            // Construct rotation matrix using WPF Media3D.
+            // BuildQuad creates the quad on the XZ plane, so its normal is Y-up (0,1,0).
+            // We map X -> tangent, Y -> n, Z -> biTangent.
             var m = new Media3D.Matrix3D(
                 tangent.X, tangent.Y, tangent.Z, 0,
-                biTangent.X, biTangent.Y, biTangent.Z, 0,
                 n.X, n.Y, n.Z, 0,
+                biTangent.X, biTangent.Y, biTangent.Z, 0,
                 _pointOnPlane.X, _pointOnPlane.Y, _pointOnPlane.Z, 1);
 
             _planeVisual.Transform = new Media3D.MatrixTransform3D(m);

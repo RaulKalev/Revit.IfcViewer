@@ -11,6 +11,7 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -64,6 +65,9 @@ namespace IfcViewer.UI
             = new Dictionary<string, CachedIfcModel>(StringComparer.OrdinalIgnoreCase);
         private string _activeIfcFolder;
 
+        // CancellationToken support — cancel previous load when starting a new one
+        private CancellationTokenSource _loadCts;
+
         // Stage 3: Revit sync glue
         private SyncRevitEvent _syncRevitEvent;
         private RevitModel     _revitModel;
@@ -104,13 +108,9 @@ namespace IfcViewer.UI
         private MeshGeometryModel3D  _selectedMesh;
         private Color4               _selectedOriginalEmissive;
         private System.Windows.Point _selectionMouseDown;
+        private readonly Stack<MeshGeometryModel3D> _hiddenMeshes = new Stack<MeshGeometryModel3D>();
 
-        // ── Always-on element outline ─────────────────────────────────────────
-        // Separate from _wireframeRoot (which the user toggles).
-        // Populated automatically whenever models load/unload via RebuildOutline().
-        // Uses a higher dihedral-angle threshold than the wireframe toggle so only
-        // the sharpest structural edges show — clean "outline" vs detailed wireframe.
-        private GroupModel3D _outlineRoot;
+
 
         // ── ViewCube compass ring ──────────────────────────────────────────────
         // WPF 2D overlay wrapped around the Helix built-in ViewCube.
@@ -373,10 +373,7 @@ namespace IfcViewer.UI
                 _wireframeRoot = new GroupModel3D();
                 _sceneRoot.Children.Add(_wireframeRoot);
 
-                // 5c. Always-on outline group — populated automatically whenever models
-                //     load/unload; not tied to the wireframe toggle.
-                _outlineRoot = new GroupModel3D();
-                _sceneRoot.Children.Add(_outlineRoot);
+                // 5c. Always-on outline removed — scene renders clean shaded meshes.
 
                 // 5d. ViewCube: apply Revit-style face texture and add compass ring.
                 _viewport.ViewCubeTexture = CreateRevitViewCubeTexture();
@@ -404,7 +401,7 @@ namespace IfcViewer.UI
                 // camera to move even in normal orbit mode.
                 this.PreviewKeyDown += (s, ev) =>
                 {
-                    if (ev.Key == Key.Space && TryHideSelectedMesh())
+                    if (ev.Key == Key.Space && TryHandleSpacebar())
                     {
                         ev.Handled = true;
                         return;
@@ -483,6 +480,11 @@ namespace IfcViewer.UI
                     _settings.Save();
                 }
 
+                // Cancel any in-flight IFC load
+                _loadCts?.Cancel();
+                _loadCts?.Dispose();
+                _loadCts = null;
+
                 // Stop auto-sync and dispose file watchers before tearing down the scene.
                 _syncRevitEvent?.StopAutoSync();
                 foreach (var w in _fileWatchers.Values) w.Dispose();
@@ -491,6 +493,7 @@ namespace IfcViewer.UI
                 // Clear selection state so no stale material references remain.
                 _selectedMesh = null;
                 _ifcElementMap.Clear();
+                _hiddenMeshes.Clear();
                 _revitElementMap.Clear();
                 _ifcGuidMeshMap.Clear();
                 _ifcCatalogItems.Clear();
@@ -785,6 +788,10 @@ namespace IfcViewer.UI
             bool loadedFromCache = false;
             try
             {
+                // Cancel any previous in-flight load
+                _loadCts?.Cancel();
+                _loadCts = new CancellationTokenSource();
+
                 DateTime writeUtc = File.GetLastWriteTimeUtc(path);
                 CachedIfcModel cached;
                 IfcModel ifcModel = null;
@@ -799,7 +806,8 @@ namespace IfcViewer.UI
                 }
                 else
                 {
-                    ifcModel = await IfcLoader.LoadAsync(path, Dispatcher, onProgress: UpdateStatus);
+                    ifcModel = await IfcLoader.LoadAsync(path, Dispatcher, onProgress: UpdateStatus,
+                                                      cancellationToken: _loadCts.Token);
                     _ifcModelCache[path] = new CachedIfcModel(ifcModel, writeUtc);
                 }
 
@@ -813,6 +821,12 @@ namespace IfcViewer.UI
                              (loadedFromCache ? "  |  cache" : ""));
                 SessionLogger.Info("Loaded: " + ifcModel.DisplayName +
                                    (loadedFromCache ? " (cache)" : ""));
+            }
+            catch (OperationCanceledException)
+            {
+                // Load was cancelled (e.g. user started a new load or closed the window)
+                SessionLogger.Info("IFC load cancelled: " + path);
+                UpdateStatus("Load cancelled.");
             }
             catch (Exception ex)
             {
@@ -845,7 +859,7 @@ namespace IfcViewer.UI
             if (WireframeToggle?.IsChecked == true)
                 RebuildWireframe();
 
-            UpdateSectionBounds();
+
 
             if (_loadedModels.Count == 1 && _revitModel == null)
                 _viewerHost.FitView(ifcModel.Bounds);
@@ -927,6 +941,14 @@ namespace IfcViewer.UI
 
             foreach (var mesh in selected.ElementMap.Keys)
                 _ifcElementMap.Remove(mesh);
+
+            if (_hiddenMeshes.Count > 0)
+            {
+                var kept = _hiddenMeshes.Where(m => !selected.ElementMap.ContainsKey(m)).ToList();
+                _hiddenMeshes.Clear();
+                for (int i = kept.Count - 1; i >= 0; i--)
+                    _hiddenMeshes.Push(kept[i]);
+            }
             RebuildIfcGuidMap();
 
             _sectionMgr?.UnregisterGroup(selected.SceneGroup);
@@ -940,7 +962,7 @@ namespace IfcViewer.UI
             RebuildOutline();
             if (WireframeToggle?.IsChecked == true)
                 RebuildWireframe();
-            UpdateSectionBounds();
+
 
             if (updateStatus)
             {
@@ -1041,7 +1063,7 @@ namespace IfcViewer.UI
 
             _revitModel = model;
             _sectionMgr?.RegisterGroup(_revitModel.SceneGroup);
-            UpdateSectionBounds();
+
 
             // Rebuild the mesh → info reverse-map for hit-testing.
             // If the currently selected mesh was a Revit element that no longer
@@ -1105,24 +1127,65 @@ namespace IfcViewer.UI
             _pendingReload = null;
         }
 
-        private bool TryHideSelectedMesh()
+        private bool TryHandleSpacebar()
         {
-            if (_selectedMesh == null) return false;
+            if (_selectedMesh != null)
+            {
+                _hiddenMeshes.Push(_selectedMesh);
+                _selectedMesh.Visibility = Visibility.Collapsed;
+                ClearSelection();
 
-            _selectedMesh.Visibility = Visibility.Collapsed;
-            ClearSelection();
+                // Rebuild wireframe/outline from visible meshes only — the hidden mesh's
+                // lines must not linger after the mesh itself disappears.
+                RebuildOutline();
+                if (WireframeToggle?.IsChecked == true)
+                    RebuildWireframe();
 
-            // Rebuild wireframe/outline from visible meshes only — the hidden mesh's
-            // lines must not linger after the mesh itself disappears.
+                SessionLogger.Info("Hidden selected element.");
+                return true;
+            }
+            else if (_hiddenMeshes.Count > 0)
+            {
+                var mesh = _hiddenMeshes.Pop();
+                mesh.Visibility = Visibility.Visible;
+                
+                if (_ifcElementMap.TryGetValue(mesh, out IfcElementInfo ifcInfo))
+                    SelectElement(mesh, ifcInfo);
+                else if (_revitElementMap.TryGetValue(mesh, out RevitElementInfo revitInfo))
+                    SelectElement(mesh, revitInfo);
+
+                RebuildOutline();
+                if (WireframeToggle?.IsChecked == true)
+                    RebuildWireframe();
+
+                SessionLogger.Info("Unhidden last element.");
+                return true;
+            }
+
+            return false;
+        }
+
+        // ── Element selection ─────────────────────────────────────────────────
+
+        private void UnhideAll_Click(object sender, RoutedEventArgs e)
+        {
+            if (_hiddenMeshes.Count == 0) return;
+
+            while (_hiddenMeshes.Count > 0)
+            {
+                var mesh = _hiddenMeshes.Pop();
+                mesh.Visibility = Visibility.Visible;
+            }
+
             RebuildOutline();
             if (WireframeToggle?.IsChecked == true)
                 RebuildWireframe();
 
-            SessionLogger.Info("Hidden selected element.");
-            return true;
+            SessionLogger.Info("Unhid all hidden elements.");
         }
 
         // ── Element selection ─────────────────────────────────────────────────
+
 
         private void Viewport_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
@@ -3096,51 +3159,9 @@ namespace IfcViewer.UI
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
-        // ── Always-on element outline ─────────────────────────────────────────
-        // Uses a higher dihedral-angle threshold (60°) than the wireframe toggle
-        // (30°) so only the sharpest structural silhouette edges show — giving a
-        // clean "outline" look rather than the detailed wireframe.
-        private void RebuildOutline()
-        {
-            if (_outlineRoot == null) return;
-            _outlineRoot.Children.Clear();
-
-            var meshList = new List<MeshGeometry3D>();
-            CollectMeshGeometries(_sceneRoot, meshList);
-
-            if (meshList.Count == 0) return;
-            SessionLogger.Info($"Outline — extracting silhouette edges from {meshList.Count} mesh(es).");
-
-            Task.Run(() =>
-            {
-                var lineGeoms = new List<LineGeometry3D>(meshList.Count);
-                foreach (var mg in meshList)
-                {
-                    var lg = WireframeHelper.ExtractHardEdges(mg, thresholdDegrees: 60f);
-                    if (lg != null) lineGeoms.Add(lg);
-                }
-                return lineGeoms;
-            }).ContinueWith(t =>
-            {
-                if (t.IsFaulted)
-                {
-                    SessionLogger.Error("Outline edge extraction failed.", t.Exception?.GetBaseException());
-                    return;
-                }
-
-                _outlineRoot.Children.Clear();
-                foreach (var lg in t.Result)
-                {
-                    _outlineRoot.Children.Add(new LineGeometryModel3D
-                    {
-                        Geometry  = lg,
-                        Color     = System.Windows.Media.Color.FromRgb(0x22, 0x22, 0x22),
-                        Thickness = 1.0,
-                    });
-                }
-                SessionLogger.Info($"Outline overlay: {t.Result.Count} line object(s).");
-            }, TaskScheduler.FromCurrentSynchronizationContext());
-        }
+        // ── Always-on element outline (disabled) ─────────────────────────────
+        // Outline overlay removed — the model renders as clean shaded geometry.
+        private void RebuildOutline() { }
 
         /// <summary>
         /// Recursively collects all <see cref="MeshGeometry3D"/> geometry objects from
@@ -3151,7 +3172,6 @@ namespace IfcViewer.UI
             foreach (var child in group.Children)
             {
                 if (ReferenceEquals(child, _wireframeRoot))           continue;
-                if (ReferenceEquals(child, _outlineRoot))             continue;
                 // Skip the section-plane quad — it is a 500 m helper mesh, not
                 // building geometry, and would produce a giant diagonal line.
                 if (_sectionMgr != null &&
@@ -3265,79 +3285,75 @@ namespace IfcViewer.UI
         private void SectionPlane_Checked(object sender, RoutedEventArgs e)
         {
             if (_sectionMgr == null) return;
-            _sectionMgr.Enabled = true;
-            SessionLogger.Info("Section plane enabled.");
+            // Do NOT enable the plane yet — wait for the user to pick a face.
+            if (_viewport != null)
+                _viewport.PreviewMouseRightButtonUp += SectionPlane_FacePick;
+            UpdateStatus("Section plane: right-click a face to set the cut plane.");
+            SessionLogger.Info("Section plane mode entered — awaiting face pick.");
         }
 
         private void SectionPlane_Unchecked(object sender, RoutedEventArgs e)
         {
             if (_sectionMgr == null) return;
             _sectionMgr.Enabled = false;
+            if (_viewport != null)
+                _viewport.PreviewMouseRightButtonUp -= SectionPlane_FacePick;
+            UpdateStatus("Section plane disabled.");
             SessionLogger.Info("Section plane disabled.");
         }
 
-        private void SectionAxis_Changed(object sender, RoutedEventArgs e)
-        {
-            if (_sectionMgr == null) return;
-            if (SectionAxisX?.IsChecked == true)      _sectionMgr.Axis = SectionAxis.X;
-            else if (SectionAxisY?.IsChecked == true) _sectionMgr.Axis = SectionAxis.Y;
-            else                                      _sectionMgr.Axis = SectionAxis.Z;
-
-            // Re-centre slider range on the new axis
-            UpdateSectionBounds();
-        }
-
-        private void SectionOffset_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
-        {
-            if (_sectionMgr == null) return;
-            _sectionMgr.Offset = (float)e.NewValue;
-            if (SectionOffsetLabel != null)
-                SectionOffsetLabel.Text = e.NewValue.ToString("F2");
-        }
-
         /// <summary>
-        /// Recalculate the section slider min/max from the combined scene bounding box
-        /// so the slider always covers the full extent of loaded geometry.
+        /// Right-click pick handler — active only while the section plane toggle is on.
+        /// Derives the cut plane from the face normal and hit point of the picked face.
         /// </summary>
-        private void UpdateSectionBounds()
+        private void SectionPlane_FacePick(object sender, MouseButtonEventArgs e)
         {
-            if (_sectionMgr == null || SectionOffsetSlider == null) return;
+            if (_sectionMgr == null) return;
 
-            // Collect all known bounds
-            float min = float.MaxValue, max = float.MinValue;
+            var pos  = e.GetPosition(_viewport);
+            var hits = _viewport?.FindHits(pos);
+            if (hits == null || hits.Count == 0) return;
 
-            foreach (var m in _loadedModels)
+            // Enable the plane on the first successful pick (EnablePlane after SetPlane).
+
+            foreach (var hit in hits)
             {
-                var b = m.Bounds;
-                if (b.Maximum == b.Minimum) continue;
-                UpdateMinMax(b, ref min, ref max);
+                var mesh = hit.ModelHit as MeshGeometryModel3D;
+                if (mesh == null) continue;
+
+                // Skip the plane-visual quad itself
+                if (_sectionMgr.PlaneVisual != null &&
+                    ReferenceEquals(mesh, _sectionMgr.PlaneVisual)) continue;
+
+                // NormalAtHit points out of the face. We want the section plane to cut INTO
+                // the object, so we must reverse the normal so the half-space subtracted
+                // is the volume behind the clicked face.
+                var rawNormal = hit.NormalAtHit;
+                var faceNormal = new SharpDX.Vector3(
+                    (float)-rawNormal.X, (float)-rawNormal.Y, (float)-rawNormal.Z);
+                if (faceNormal.LengthSquared() < 1e-6f) continue;
+                faceNormal = SharpDX.Vector3.Normalize(faceNormal);
+
+                // PointHit is already in world space for HelixToolkit SharpDX.
+                var hitPt = new SharpDX.Vector3(
+                    (float)hit.PointHit.X,
+                    (float)hit.PointHit.Y,
+                    (float)hit.PointHit.Z);
+                    
+                // Offset the plane slightly outward along the original (un-inverted) face normal 
+                // to prevent intense Z-buffer fighting between the visual quad and the newly cut edge.
+                hitPt += rawNormal * 0.05f;
+
+                _sectionMgr.SetPlane(faceNormal, hitPt);
+                _sectionMgr.Enabled = true;  // activate/update after plane is defined
+
+                UpdateStatus($"Section plane set — normal ({faceNormal.X:F2}, {faceNormal.Y:F2}, {faceNormal.Z:F2}).");
+                SessionLogger.Info($"Section plane set from face pick — normal {faceNormal}.");
+
+                // Prevent Helix from treating this right-click as a camera orbit start.
+                e.Handled = true;
+                return;
             }
-            if (_revitModel != null)
-            {
-                var b = _revitModel.Bounds;
-                if (b.Maximum != b.Minimum)
-                    UpdateMinMax(b, ref min, ref max);
-            }
-
-            if (min > max) { min = -50; max = 50; }
-
-            // Add 10% padding
-            float pad = Math.Max((max - min) * 0.1f, 1f);
-            min -= pad; max += pad;
-
-            _sectionMgr.MinBound = min;
-            _sectionMgr.MaxBound = max;
-
-            SectionOffsetSlider.Minimum = min;
-            SectionOffsetSlider.Maximum = max;
-        }
-
-        private static void UpdateMinMax(SharpDX.BoundingBox b, ref float min, ref float max)
-        {
-            // Choose the relevant component based on current axis selection would be ideal,
-            // but using the full extents keeps this simple and always correct.
-            min = Math.Min(min, Math.Min(b.Minimum.X, Math.Min(b.Minimum.Y, b.Minimum.Z)));
-            max = Math.Max(max, Math.Max(b.Maximum.X, Math.Max(b.Maximum.Y, b.Maximum.Z)));
         }
 
         // ── Settings ──────────────────────────────────────────────────────────

@@ -11,6 +11,14 @@
     <NoWarn>CA1416;NU1701</NoWarn>
   </PropertyGroup>
 
+  <!-- Exclude sub-projects from auto-globbing (they have their own .csproj) -->
+  <ItemGroup>
+    <Compile Remove="IfcCore\**" />
+    <Compile Remove="IfcCore.Tests\**" />
+    <None Remove="IfcCore\**" />
+    <None Remove="IfcCore.Tests\**" />
+  </ItemGroup>
+
   <!-- Per-version output folders -->
   <PropertyGroup Condition="'$(TargetFramework)' == 'net48'">
     <BaseOutputPath>C:\Users\mibil\OneDrive\Desktop\DevDlls\IfcViewer\2024</BaseOutputPath>
@@ -50,6 +58,10 @@
     <PackageReference Include="ricaun.Revit.UI" Version="0.7.1" />
     <PackageReference Include="Xbim.Essentials" Version="5.1.288" />
     <PackageReference Include="Xbim.Geometry" Version="5.1.288" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="IfcCore\IfcCore.csproj" />
   </ItemGroup>
 
   <!-- Force-copy HelixToolkit.SharpDX.Core (netstandard2.0) to output.
@@ -185,9 +197,5 @@
       <SubType>Code</SubType>
     </Compile>
   </ItemGroup>
-
-  <Target Name="SignBuild" AfterTargets="Build" Condition="('$(Configuration)' == 'Release2024' OR '$(Configuration)' == 'Release2026') AND '$(TargetPath)' != ''">
-    <Exec Command="&quot;C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe&quot; sign /f &quot;C:\Users\mibil\OneDrive\Desktop\RKToolsCert.pfx&quot; /p &quot;RaulKalev&quot; /tr http://timestamp.digicert.com /td SHA256 /fd SHA256 &quot;$(TargetPath)&quot;" />
-  </Target>
 
 </Project>

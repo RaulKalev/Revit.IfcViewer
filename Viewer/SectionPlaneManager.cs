@@ -6,17 +6,18 @@ using Media3D = System.Windows.Media.Media3D;
 namespace IfcViewer.Viewer
 {
     /// <summary>
-    /// Manages a single axis-aligned section plane applied to every mesh in the scene.
+    /// Manages a single arbitrary section plane applied to every mesh in the scene.
+    ///
+    /// The plane is defined by a world-space normal and a point that lies on the plane.
+    /// Call <see cref="SetPlane"/> whenever the user picks a new face.
     ///
     /// Meshes are loaded as plain <see cref="MeshGeometryModel3D"/> (cheap Blinn-Phong
-    /// shader). When the section plane is enabled for the first time, this manager
-    /// swaps each registered mesh to a <see cref="CrossSectionMeshGeometryModel3D"/>
-    /// in-place inside its parent group, then applies the clip plane. When disabled,
-    /// it swaps them back to plain meshes — restoring the cheaper shader path.
+    /// shader). When the section plane is enabled, this manager swaps each registered mesh
+    /// to a <see cref="CrossSectionMeshGeometryModel3D"/> in-place inside its parent group,
+    /// then applies the clip plane. When disabled it swaps them back to plain meshes.
     ///
     /// Also owns a semi-transparent blue quad that visualises the plane position.
-    /// Call <see cref="AttachVisual"/> once on the UI thread, then update
-    /// <see cref="Axis"/> / <see cref="Offset"/> / <see cref="Enabled"/> freely.
+    /// Call <see cref="AttachVisual"/> once on the UI thread.
     /// </summary>
     public sealed class SectionPlaneManager
     {
@@ -31,18 +32,14 @@ namespace IfcViewer.Viewer
         private readonly List<MeshEntry> _entries = new List<MeshEntry>();
 
         // ── Backing fields ────────────────────────────────────────────────────
-        private bool        _enabled;
-        private SectionAxis _axis   = SectionAxis.Z;
-        private float       _offset = 0f;
-
-        // ── Axis range hints (updated by caller after loading geometry) ───────
-        public float MinBound { get; set; } = -50f;
-        public float MaxBound { get; set; } =  50f;
+        private bool    _enabled;
+        private Vector3 _normal      = new Vector3(0, 0, 1);   // default: Z-up
+        private Vector3 _pointOnPlane = Vector3.Zero;
 
         // ── Visual quad ──────────────────────────────────────────────────────
         private MeshGeometryModel3D _planeVisual;
         private GroupModel3D        _visualParent;
-        private const float QuadHalfSize = 500f;
+        private const float         QuadHalfSize = 500f;
 
         /// <summary>
         /// The semi-transparent plane quad mesh, or <c>null</c> before
@@ -68,17 +65,16 @@ namespace IfcViewer.Viewer
             }
         }
 
-        public SectionAxis Axis
+        /// <summary>
+        /// Define the section plane from a world-space face normal and a point on that face.
+        /// The plane clips everything on the side the normal points towards.
+        /// </summary>
+        public void SetPlane(Vector3 normal, Vector3 pointOnPlane)
         {
-            get => _axis;
-            set { _axis = value; if (_enabled) ApplyAll(); UpdateVisual(); }
-        }
-
-        /// <summary>Signed distance from origin along the chosen axis (metres).</summary>
-        public float Offset
-        {
-            get => _offset;
-            set { _offset = value; if (_enabled) ApplyAll(); UpdateVisual(); }
+            _normal       = Vector3.Normalize(normal);
+            _pointOnPlane = pointOnPlane;
+            if (_enabled) ApplyAll();
+            UpdateVisual();
         }
 
         // ── Visual attachment ─────────────────────────────────────────────────
@@ -97,10 +93,10 @@ namespace IfcViewer.Viewer
 
             var mat = new PhongMaterial
             {
-                DiffuseColor      = new Color4(0.20f, 0.55f, 1.00f, 0.30f),
-                AmbientColor      = new Color4(0.10f, 0.30f, 0.60f, 0.15f),
-                SpecularColor     = new Color4(0f, 0f, 0f, 0f),
-                SpecularShininess = 1f,
+                DiffuseColor      = new Color4(1.00f, 0.00f, 1.00f, 0.80f), // Bright magenta, mostly opaque
+                AmbientColor      = new Color4(0.50f, 0.00f, 0.50f, 0.80f),
+                SpecularColor     = new Color4(1f, 1f, 1f, 1f),
+                SpecularShininess = 10f,
             };
 
             _planeVisual = new MeshGeometryModel3D
@@ -108,7 +104,7 @@ namespace IfcViewer.Viewer
                 Geometry      = mesh,
                 Material      = mat,
                 IsTransparent = true,
-                DepthBias     = -100,
+                CullMode      = SharpDX.Direct3D11.CullMode.None // Make it double-sided
             };
 
             parent.Children.Add(_planeVisual);
@@ -138,8 +134,8 @@ namespace IfcViewer.Viewer
 
             var entry = new MeshEntry
             {
-                Parent        = parent,
-                LiveMesh      = mesh,
+                Parent         = parent,
+                LiveMesh       = mesh,
                 IsCrossSection = mesh is CrossSectionMeshGeometryModel3D
             };
             _entries.Add(entry);
@@ -293,11 +289,9 @@ namespace IfcViewer.Viewer
 
         private void ApplyCross(CrossSectionMeshGeometryModel3D mesh)
         {
-            Vector3 normal     = AxisNormal(_axis);
-            Vector3 planePoint = normal * _offset;
-            float d            = -Vector3.Dot(normal, planePoint);
-
-            mesh.Plane1           = new Plane(normal, d);
+            // Hessian-normal form: Plane(n, d) where d = -dot(n, pointOnPlane)
+            float d = -Vector3.Dot(_normal, _pointOnPlane);
+            mesh.Plane1           = new Plane(_normal, d);
             mesh.EnablePlane1     = true;
             mesh.CuttingOperation = CuttingOperation.Subtract;
         }
@@ -314,26 +308,39 @@ namespace IfcViewer.Viewer
 
             if (!_enabled) return;
 
-            var xform = new Media3D.Transform3DGroup();
+            // Build a rotation that brings the quad's Y-up normal (0,1,0) to align with _normal.
+            // We want the primary face of the quad to point OUT of the wall (along _normal)
+            // so it gets lit by the scene lights. (We reversed the clipping plane d-value elsewhere).
+            var n = _normal;
+            n.Normalize();
 
-            switch (_axis)
+            var yUpVec = new Media3D.Vector3D(0, 1, 0);
+            var targetVec = new Media3D.Vector3D(n.X, n.Y, n.Z);
+
+            double angle = Media3D.Vector3D.AngleBetween(yUpVec, targetVec);
+            Media3D.Vector3D axis;
+
+            if (angle < 0.1)
             {
-                case SectionAxis.X:
-                    xform.Children.Add(new Media3D.RotateTransform3D(
-                        new Media3D.AxisAngleRotation3D(new Media3D.Vector3D(0, 0, 1), 90)));
-                    xform.Children.Add(new Media3D.TranslateTransform3D(_offset, 0, 0));
-                    break;
-
-                case SectionAxis.Y:
-                    xform.Children.Add(new Media3D.TranslateTransform3D(0, _offset, 0));
-                    break;
-
-                default: // Z
-                    xform.Children.Add(new Media3D.RotateTransform3D(
-                        new Media3D.AxisAngleRotation3D(new Media3D.Vector3D(1, 0, 0), 90)));
-                    xform.Children.Add(new Media3D.TranslateTransform3D(0, 0, _offset));
-                    break;
+                axis = new Media3D.Vector3D(1, 0, 0);
+                angle = 0;
             }
+            else if (angle > 179.9)
+            {
+                axis = new Media3D.Vector3D(1, 0, 0);
+                angle = 180;
+            }
+            else
+            {
+                axis = Media3D.Vector3D.CrossProduct(yUpVec, targetVec);
+                axis.Normalize();
+            }
+
+            var xform = new Media3D.Transform3DGroup();
+            xform.Children.Add(new Media3D.RotateTransform3D(
+                new Media3D.AxisAngleRotation3D(axis, angle)));
+            xform.Children.Add(new Media3D.TranslateTransform3D(
+                _pointOnPlane.X, _pointOnPlane.Y, _pointOnPlane.Z));
 
             _planeVisual.Transform = xform;
         }
@@ -360,17 +367,5 @@ namespace IfcViewer.Viewer
                 0, 2, 1,  0, 3, 2,   // back
             };
         }
-
-        private static Vector3 AxisNormal(SectionAxis axis)
-        {
-            switch (axis)
-            {
-                case SectionAxis.X:  return new Vector3(1, 0, 0);
-                case SectionAxis.Y:  return new Vector3(0, 1, 0);
-                default:             return new Vector3(0, 0, 1);
-            }
-        }
     }
-
-    public enum SectionAxis { X, Y, Z }
 }

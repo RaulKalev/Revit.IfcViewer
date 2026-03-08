@@ -204,9 +204,17 @@
                         <Button x:Name="SettingsButton"
                                 Click="Settings_Click"
                                 Style="{StaticResource CustomActionButtonStyle}"
-                                Width="32" Height="32" Margin="0,0,0,0"
+                                Width="32" Height="32" Margin="0,0,6,0"
                                 ToolTip="Viewer settings">
                             <materialDesign:PackIcon Kind="Cog" Width="20" Height="20"/>
+                        </Button>
+                        <Separator Width="1" Margin="4,4" Background="{DynamicResource BorderBrush}"/>
+                        <Button x:Name="UnhideAllButton"
+                                Click="UnhideAll_Click"
+                                Style="{StaticResource CustomActionButtonStyle}"
+                                Width="32" Height="32" Margin="0,0,0,0"
+                                ToolTip="Unhide all hidden elements">
+                            <materialDesign:PackIcon Kind="Eye" Width="20" Height="20"/>
                         </Button>
                     </StackPanel>
                 </Border>
@@ -291,53 +299,8 @@
                                         SmallChange="0.05" LargeChange="0.1"
                                         Foreground="{DynamicResource TextHighlightBrush}"
                                         ValueChanged="RevitOpacity_ValueChanged"/>
-
-                                <!-- ── Section Plane ── -->
-                                <Separator Margin="0,10,0,6" Background="{DynamicResource BorderBrush}"/>
-                                <TextBlock Text="SECTION PLANE"
-                                           FontSize="11" FontWeight="SemiBold"
-                                           Foreground="{DynamicResource IconBrush}"
-                                           Margin="0,0,0,6"/>
-
-                                <!-- Axis selector -->
-                                <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
-                                    <RadioButton x:Name="SectionAxisX"
-                                                 Content="X" GroupName="SectionAxis"
-                                                 Foreground="{DynamicResource ForegroundBrush}"
-                                                 Margin="0,0,8,0"
-                                                 Checked="SectionAxis_Changed"/>
-                                    <RadioButton x:Name="SectionAxisY"
-                                                 Content="Y" GroupName="SectionAxis"
-                                                 Foreground="{DynamicResource ForegroundBrush}"
-                                                 Margin="0,0,8,0"
-                                                 Checked="SectionAxis_Changed"/>
-                                    <RadioButton x:Name="SectionAxisZ"
-                                                 Content="Z" GroupName="SectionAxis"
-                                                 IsChecked="True"
-                                                 Foreground="{DynamicResource ForegroundBrush}"
-                                                 Checked="SectionAxis_Changed"/>
-                                </StackPanel>
-
-                                <!-- Offset label + value -->
-                                <Grid Margin="0,0,0,2">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*"/>
-                                        <ColumnDefinition Width="Auto"/>
-                                    </Grid.ColumnDefinitions>
-                                    <TextBlock Grid.Column="0" Text="Offset (m)"
-                                               Foreground="{DynamicResource IconBrush}"
-                                               FontSize="10"/>
-                                    <TextBlock x:Name="SectionOffsetLabel"
-                                               Grid.Column="1" Text="0.00"
-                                               Foreground="{DynamicResource ForegroundBrush}"
-                                               FontSize="10"/>
-                                </Grid>
-                                <Slider x:Name="SectionOffsetSlider"
-                                        Minimum="-50" Maximum="50" Value="0"
-                                        SmallChange="0.1" LargeChange="1"
-                                        Foreground="{DynamicResource TextHighlightBrush}"
-                                        ValueChanged="SectionOffset_ValueChanged"/>
                             </StackPanel>
+
                         </Grid>
                     </Border>
 

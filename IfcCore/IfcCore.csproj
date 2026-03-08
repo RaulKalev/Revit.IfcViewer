@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>IfcCore</AssemblyName>
+    <RootNamespace>IfcCore</RootNamespace>
+    <LangVersion>8.0</LangVersion>
+    <PlatformTarget>x64</PlatformTarget>
+    <NoWarn>NU1701</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Xbim.Essentials" Version="5.1.288" />
+    <PackageReference Include="Xbim.Geometry" Version="5.1.288" />
+  </ItemGroup>
+
+</Project>

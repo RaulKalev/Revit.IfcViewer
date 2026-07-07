@@ -7,24 +7,15 @@
     <PlatformTarget>x64</PlatformTarget>
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
-    <NoWarn>CA1416;NU1701</NoWarn>
-  </PropertyGroup>
-
-  <!-- Exclude sub-projects from auto-globbing (they have their own .csproj) -->
-  <ItemGroup>
-    <Compile Remove="IfcCore\**" />
-    <Compile Remove="IfcCore.Tests\**" />
-    <None Remove="IfcCore\**" />
-    <None Remove="IfcCore.Tests\**" />
-  </ItemGroup>
-
-  <!-- Per-version output folders -->
-  <PropertyGroup Condition="'$(TargetFramework)' == 'net48'">
-    <BaseOutputPath>bin\2024</BaseOutputPath>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
-    <BaseOutputPath>bin\2026</BaseOutputPath>
+    <NoWarn>CA1416;NU1701;NU1603;NU5104;MSB3277</NoWarn>
+    <!-- All dependency DLLs (managed + native) are gzip-compressed and embedded
+         as resources; DependencyLoader extracts them at runtime. Deployment is
+         IfcViewer.dll + the .addin manifest, nothing else.
+         Opt out with -p:EmbedDependencies=false (loose-file output). -->
+    <EmbedDependencies Condition="'$(EmbedDependencies)' == ''">true</EmbedDependencies>
   </PropertyGroup>
 
   <!-- Named build configurations for each Revit version -->
@@ -35,179 +26,174 @@
     <TargetFrameworks>net8.0-windows</TargetFrameworks>
   </PropertyGroup>
 
+  <!-- Revit version per target framework -->
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net48'">
+    <RevitVersion>2024</RevitVersion>
+    <RevitApiVersion>2024.3.40</RevitApiVersion>
+    <DefineConstants>$(DefineConstants);REVIT2024</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
+    <RevitVersion>2026</RevitVersion>
+    <RevitApiVersion>2026.4.10</RevitApiVersion>
+    <DefineConstants>$(DefineConstants);REVIT2026</DefineConstants>
+  </PropertyGroup>
+
+  <!-- Exclude sub-projects and legacy sources from auto-globbing -->
+  <ItemGroup>
+    <Compile Remove="IfcCore\**" />
+    <Compile Remove="IfcCore.Tests\**" />
+    <None Remove="IfcCore\**" />
+    <None Remove="IfcCore.Tests\**" />
+  </ItemGroup>
+
   <ItemGroup>
     <Resource Include="Assets\IfcViewer.tiff" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Fody" Version="6.8.2">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-    </PackageReference>
-    <PackageReference Include="Costura.Fody" Version="6.0.0">
-      <PrivateAssets>all</PrivateAssets>
-    </PackageReference>
-    <!-- HelixToolkit: Private=True so all deps copy to output folder -->
-    <PackageReference Include="HelixToolkit.Wpf.SharpDX" Version="2.25.0">
-      <IncludeAssets>all</IncludeAssets>
-      <ExcludeAssets>none</ExcludeAssets>
-    </PackageReference>
+    <!-- Revit API from NuGet — reference-only, never copied or embedded.
+         No local Revit installation is needed to build. -->
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="$(RevitApiVersion)" ExcludeAssets="runtime" />
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPIUI" Version="$(RevitApiVersion)" ExcludeAssets="runtime" />
+    <PackageReference Include="Nice3point.Revit.Api.AdWindows" Version="$(RevitApiVersion)" ExcludeAssets="runtime" />
+
+    <PackageReference Include="HelixToolkit.Wpf.SharpDX" Version="2.25.0" />
     <PackageReference Include="MaterialDesignColors" Version="5.2.1" />
     <PackageReference Include="MaterialDesignThemes" Version="5.2.1" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="ricaun.Revit.UI" Version="0.7.1" />
-    <PackageReference Include="Xbim.Essentials" Version="5.1.288" />
-    <PackageReference Include="Xbim.Geometry" Version="5.1.288" />
+
+    <!-- xBIM v6 — the 6.x geometry engine (OpenCascade based) runs on BOTH
+         .NET Framework 4.8 and .NET 8, unlike 5.1 whose mixed-mode engine is
+         .NET Framework only (IFC loading could never work in Revit 2026 with 5.1). -->
+    <PackageReference Include="Xbim.Essentials" Version="6.0.587" />
+    <PackageReference Include="Xbim.Geometry" Version="6.3.891-netcore" />
   </ItemGroup>
 
-  <ItemGroup>
-    <ProjectReference Include="IfcCore\IfcCore.csproj" />
-  </ItemGroup>
-
-  <!-- Force-copy HelixToolkit.SharpDX.Core (netstandard2.0) to output.
-       It doesn't auto-copy for net48 targets. -->
-  <ItemGroup>
-    <None Include="$(NuGetPackageRoot)helixtoolkit.sharpdx.core\2.25.0\lib\netstandard2.0\HelixToolkit.SharpDX.Core.dll" Condition="Exists('$(NuGetPackageRoot)helixtoolkit.sharpdx.core\2.25.0\lib\netstandard2.0\HelixToolkit.SharpDX.Core.dll')">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Visible>false</Visible>
-      <Link>HelixToolkit.SharpDX.Core.dll</Link>
-    </None>
-  </ItemGroup>
-
-  <!-- Force-copy xBIM managed DLLs for net8.0-windows.
-       The SDK selects netstandard2.0/net47 TFMs for these packages but does not
-       copy them automatically for the net8 target. Costura cannot embed them
-       either (they are not in net8's direct reference closure).
-       We copy them as loose files; OnAssemblyResolve picks them up at runtime. -->
-  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
-    <!-- netstandard2.0 flavours -->
-    <None Include="$(NuGetPackageRoot)xbim.common\5.1.289\lib\netstandard2.0\Xbim.Common.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.Common.dll</Link>
-    </None>
-    <None Include="$(NuGetPackageRoot)xbim.ifc\5.1.289\lib\netstandard2.0\Xbim.Ifc.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.Ifc.dll</Link>
-    </None>
-    <None Include="$(NuGetPackageRoot)xbim.ifc2x3\5.1.289\lib\netstandard2.0\Xbim.Ifc2x3.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.Ifc2x3.dll</Link>
-    </None>
-    <None Include="$(NuGetPackageRoot)xbim.ifc4\5.1.289\lib\netstandard2.0\Xbim.Ifc4.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.Ifc4.dll</Link>
-    </None>
-    <None Include="$(NuGetPackageRoot)xbim.io.memorymodel\5.1.289\lib\netstandard2.0\Xbim.IO.MemoryModel.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.IO.MemoryModel.dll</Link>
-    </None>
-    <None Include="$(NuGetPackageRoot)xbim.tessellator\5.1.289\lib\netstandard2.0\Xbim.Tessellator.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.Tessellator.dll</Link>
-    </None>
-    <!-- net47 flavours (no netstandard2.0 build available) -->
-    <None Include="$(NuGetPackageRoot)xbim.io.esent\5.1.289\lib\net47\Xbim.IO.Esent.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.IO.Esent.dll</Link>
-    </None>
-    <None Include="$(NuGetPackageRoot)xbim.modelgeometry.scene\5.1.288\lib\net47\Xbim.ModelGeometry.Scene.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.ModelGeometry.Scene.dll</Link>
-    </None>
-    <None Include="$(NuGetPackageRoot)xbim.geometry.engine.interop\5.1.288\lib\net47\Xbim.Geometry.Engine.Interop.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.Geometry.Engine.Interop.dll</Link>
-    </None>
-    <!-- ManagedEsent (Esent.Interop) — net40 build is .NET Framework but loads fine at runtime -->
-    <None Include="$(NuGetPackageRoot)managedesent\1.9.4\lib\net40\Esent.Interop.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Esent.Interop.dll</Link>
-    </None>
-  </ItemGroup>
-
-  <!-- Force-copy net47/net40-only xBIM assemblies for net48 as well.
-       These are NOT embedded by Costura (removed from IncludeAssemblies to keep
-       FodyWeavers.xml valid for both TFs). They land as loose DLLs next to
-       IfcViewer.dll and are loaded by App.OnAssemblyResolve at runtime. -->
   <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
-    <None Include="$(NuGetPackageRoot)xbim.io.esent\5.1.289\lib\net47\Xbim.IO.Esent.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.IO.Esent.dll</Link>
-    </None>
-    <None Include="$(NuGetPackageRoot)xbim.modelgeometry.scene\5.1.288\lib\net47\Xbim.ModelGeometry.Scene.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.ModelGeometry.Scene.dll</Link>
-    </None>
-    <None Include="$(NuGetPackageRoot)xbim.geometry.engine.interop\5.1.288\lib\net47\Xbim.Geometry.Engine.Interop.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Xbim.Geometry.Engine.Interop.dll</Link>
-    </None>
-    <None Include="$(NuGetPackageRoot)managedesent\1.9.4\lib\net40\Esent.Interop.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory><Visible>false</Visible><Link>Esent.Interop.dll</Link>
-    </None>
-  </ItemGroup>
-
-  <!-- Locate the Revit installs. Probe the standard Program Files location
-       first, then known custom install drives; override from the command line
-       with -p:Revit2024Dir=... / -p:Revit2026Dir=... if needed. -->
-  <PropertyGroup>
-    <Revit2024Dir Condition="'$(Revit2024Dir)' == '' and Exists('C:\Program Files\Autodesk\Revit 2024\RevitAPI.dll')">C:\Program Files\Autodesk\Revit 2024</Revit2024Dir>
-    <Revit2024Dir Condition="'$(Revit2024Dir)' == '' and Exists('E:\Autodesk\Revit 2024\RevitAPI.dll')">E:\Autodesk\Revit 2024</Revit2024Dir>
-    <Revit2024Dir Condition="'$(Revit2024Dir)' == ''">C:\Program Files\Autodesk\Revit 2024</Revit2024Dir>
-    <Revit2026Dir Condition="'$(Revit2026Dir)' == '' and Exists('C:\Program Files\Autodesk\Revit 2026\RevitAPI.dll')">C:\Program Files\Autodesk\Revit 2026</Revit2026Dir>
-    <Revit2026Dir Condition="'$(Revit2026Dir)' == '' and Exists('E:\Revit 2026\RevitAPI.dll')">E:\Revit 2026</Revit2026Dir>
-    <Revit2026Dir Condition="'$(Revit2026Dir)' == ''">C:\Program Files\Autodesk\Revit 2026</Revit2026Dir>
-  </PropertyGroup>
-
-  <!-- Revit 2024 (NET 4.8) -->
-  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
-    <Reference Include="AdWindows">
-      <HintPath>$(Revit2024Dir)\AdWindows.dll</HintPath>
-      <Private>False</Private>
-    </Reference>
-    <Reference Include="RevitAPI">
-      <HintPath>$(Revit2024Dir)\RevitAPI.dll</HintPath>
-      <Private>False</Private>
-    </Reference>
-    <Reference Include="RevitAPIUI">
-      <HintPath>$(Revit2024Dir)\RevitAPIUI.dll</HintPath>
-      <Private>False</Private>
-    </Reference>
+    <!-- Allows building the net48 target without a Visual Studio targeting pack -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
     <Reference Include="System.Windows.Forms" />
-    <Reference Include="System.Data.DataSetExtensions" />
   </ItemGroup>
 
-  <!-- Revit 2026 (NET 8.0) -->
   <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
-    <Reference Include="AdWindows">
-      <HintPath>$(Revit2026Dir)\AdWindows.dll</HintPath>
-      <Private>False</Private>
-    </Reference>
-    <Reference Include="RevitAPI">
-      <HintPath>$(Revit2026Dir)\RevitAPI.dll</HintPath>
-      <Private>False</Private>
-    </Reference>
-    <Reference Include="RevitAPIUI">
-      <HintPath>$(Revit2026Dir)\RevitAPIUI.dll</HintPath>
-      <Private>False</Private>
-    </Reference>
+    <PackageReference Include="System.Configuration.ConfigurationManager" Version="8.0.1" />
   </ItemGroup>
 
-  <!-- Exclude legacy ProSchedules template files that are not part of IfcViewer -->
-  <ItemGroup>
-    <Compile Remove="Commands\ProSheetsCommand.cs" />
-    <Compile Remove="ExternalEvents\**" />
-    <Compile Remove="Models\**" />
-    <Compile Remove="Services\**" />
-    <Compile Remove="UI\DuplicateSheetsWindow.xaml.cs" />
-    <Compile Remove="UI\RenameWindow.xaml.cs" />
-    <Compile Remove="UI\ParametersWindow.xaml.cs" />
-    <Compile Remove="UI\SortingWindow.xaml.cs" />
-    <Compile Remove="UI\ChangelogWindow.xaml.cs" />
-    <Compile Remove="UI\WindowResizer.cs" />
-  </ItemGroup>
-  <ItemGroup>
-    <Page Remove="UI\DuplicateSheetsWindow.xaml" />
-    <Page Remove="UI\RenameWindow.xaml" />
-    <Page Remove="UI\ParametersWindow.xaml" />
-    <Page Remove="UI\SortingWindow.xaml" />
-    <Page Remove="UI\ChangelogWindow.xaml" />
-  </ItemGroup>
-  <ItemGroup>
-    <None Remove="Assets\ProSchedules.tiff" />
-  </ItemGroup>
+  <!-- ════════════════════════════════════════════════════════════════════
+       Single-DLL packaging.
 
-  <ItemGroup>
-    <Compile Update="UI\TitleBar.xaml.cs">
-      <SubType>Code</SubType>
-    </Compile>
-  </ItemGroup>
+       Every dependency that would normally be copied next to IfcViewer.dll
+       (managed assemblies from NuGet + the native xBIM/OpenCascade engine
+       DLLs under win-x64\) is gzip-compressed and embedded as a resource
+       named  IfcViewer.Libs/<relative-path>.gz
+       Core/DependencyLoader.cs extracts them to %LOCALAPPDATA% on startup
+       and resolves assemblies from there.
+       ════════════════════════════════════════════════════════════════════ -->
+
+  <UsingTask TaskName="GZipFiles" TaskFactory="RoslynCodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <Inputs ParameterType="Microsoft.Build.Framework.ITaskItem[]" Required="true" />
+      <OutputDir ParameterType="System.String" Required="true" />
+      <Compressed ParameterType="Microsoft.Build.Framework.ITaskItem[]" Output="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System" />
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.IO.Compression" />
+      <Using Namespace="System.Collections.Generic" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        var results = new List<Microsoft.Build.Framework.ITaskItem>();
+        Directory.CreateDirectory(OutputDir);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in Inputs)
+        {
+            string src = item.GetMetadata("FullPath");
+            string rel = item.GetMetadata("TargetRelPath");
+            if (string.IsNullOrEmpty(rel)) rel = Path.GetFileName(src);
+            rel = rel.Replace('\\', '/');
+            if (!seen.Add(rel)) continue;               // first occurrence wins
+            if (!File.Exists(src)) { Log.LogWarning($"EmbedLibs: missing '{src}'"); continue; }
+
+            string gzPath = Path.Combine(OutputDir, rel.Replace('/', '_') + ".gz");
+            if (!File.Exists(gzPath)
+                || File.GetLastWriteTimeUtc(gzPath) < File.GetLastWriteTimeUtc(src))
+            {
+                using (var input = File.OpenRead(src))
+                using (var output = File.Create(gzPath))
+                using (var gz = new GZipStream(output, CompressionLevel.Optimal))
+                    input.CopyTo(gz);
+            }
+            var outItem = new Microsoft.Build.Utilities.TaskItem(gzPath);
+            outItem.SetMetadata("ResourceName", "IfcViewer.Libs/" + rel + ".gz");
+            results.Add(outItem);
+        }
+        Compressed = results.ToArray();
+      ]]></Code>
+    </Task>
+  </UsingTask>
+
+  <Target Name="EmbedDependencyLibs"
+          AfterTargets="ResolveAssemblyReferences"
+          BeforeTargets="PrepareResourceNames"
+          DependsOnTargets="ResolveAssemblyReferences;AssignTargetPaths"
+          Condition="'$(EmbedDependencies)' == 'true' AND '$(DesignTimeBuild)' != 'true'">
+    <ItemGroup>
+      <!-- Managed copy-local assemblies (NuGet closure).
+           net48 populates ReferenceCopyLocalPaths; the .NET SDK (net8) routes
+           package runtime assets through RuntimeCopyLocalItems instead. -->
+      <_EmbedLibFile Include="@(ReferenceCopyLocalPaths)"
+                     Condition="'%(ReferenceCopyLocalPaths.Extension)' == '.dll'">
+        <TargetRelPath>%(ReferenceCopyLocalPaths.DestinationSubDirectory)%(ReferenceCopyLocalPaths.Filename)%(ReferenceCopyLocalPaths.Extension)</TargetRelPath>
+      </_EmbedLibFile>
+      <_EmbedLibFile Include="@(RuntimeCopyLocalItems)"
+                     Condition="'%(RuntimeCopyLocalItems.Extension)' == '.dll'">
+        <TargetRelPath>%(RuntimeCopyLocalItems.DestinationSubDirectory)%(RuntimeCopyLocalItems.Filename)%(RuntimeCopyLocalItems.Extension)</TargetRelPath>
+      </_EmbedLibFile>
+      <_EmbedLibFile Include="@(NativeCopyLocalItems)"
+                     Condition="'%(NativeCopyLocalItems.Extension)' == '.dll'">
+        <TargetRelPath>%(NativeCopyLocalItems.DestinationSubDirectory)%(NativeCopyLocalItems.Filename)%(NativeCopyLocalItems.Extension)</TargetRelPath>
+      </_EmbedLibFile>
+      <!-- Native engine + OpenCascade DLLs (arrive as Content items with a
+           win-x64\ / win-x86\ Link from the xBIM package targets) -->
+      <_EmbedLibFile Include="@(ContentWithTargetPath)"
+                     Condition="'%(ContentWithTargetPath.CopyToOutputDirectory)' != '' AND '%(ContentWithTargetPath.Extension)' == '.dll'">
+        <TargetRelPath>%(ContentWithTargetPath.TargetPath)</TargetRelPath>
+      </_EmbedLibFile>
+      <_EmbedLibFile Include="@(NoneWithTargetPath)"
+                     Condition="'%(NoneWithTargetPath.CopyToOutputDirectory)' != '' AND '%(NoneWithTargetPath.Extension)' == '.dll'">
+        <TargetRelPath>%(NoneWithTargetPath.TargetPath)</TargetRelPath>
+      </_EmbedLibFile>
+      <!-- Revit is x64-only: skip 32-bit engine flavours -->
+      <_EmbedLibFile Remove="@(_EmbedLibFile)"
+                     Condition="$([System.String]::new('%(_EmbedLibFile.TargetRelPath)').StartsWith('win-x86'))" />
+    </ItemGroup>
+
+    <GZipFiles Inputs="@(_EmbedLibFile)" OutputDir="$(IntermediateOutputPath)embedlibs\">
+      <Output TaskParameter="Compressed" ItemName="_EmbedLibGz" />
+    </GZipFiles>
+
+    <ItemGroup>
+      <EmbeddedResource Include="@(_EmbedLibGz)">
+        <LogicalName>%(_EmbedLibGz.ResourceName)</LogicalName>
+        <Visible>false</Visible>
+      </EmbeddedResource>
+    </ItemGroup>
+
+    <Message Importance="normal" Text="EmbedDependencyLibs: embedded @(_EmbedLibGz->Count()) dependency DLLs" />
+  </Target>
+
+  <!-- Optional: deploy straight into the Revit addins folder for quick testing:
+         dotnet build -c Release2026 -p:DeployAddin=true                        -->
+  <Target Name="DeployAddin" AfterTargets="Build"
+          Condition="'$(DeployAddin)' == 'true' AND '$(RevitVersion)' != ''">
+    <PropertyGroup>
+      <_AddinDir>$(APPDATA)\Autodesk\Revit\Addins\$(RevitVersion)</_AddinDir>
+    </PropertyGroup>
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(_AddinDir)\IfcViewer" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\Deploy\IfcViewer.addin" DestinationFolder="$(_AddinDir)" />
+    <Message Importance="high" Text="Deployed IfcViewer.dll + manifest → $(_AddinDir)" />
+  </Target>
 
 </Project>

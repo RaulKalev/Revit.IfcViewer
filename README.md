@@ -123,13 +123,12 @@ Instead, geometry is merged into larger renderable meshes, usually grouped by co
 |---|---|
 | `App.cs` | Revit external application, ribbon button registration, dependency resolution. |
 | `Commands/` | Revit external command that opens or focuses the modeless viewer window. |
-| `Core/` | Shared infrastructure such as session logging. |
+| `Core/` | Shared infrastructure such as session logging and the self-contained dependency loader. |
 | `Ifc/` | IFC loading, model records, caching, file watching, and xBIM-based geometry handling. |
-| `IfcCore/` | IFC viewer service abstractions / shared IFC core layer. |
 | `Revit/` | Revit geometry export, model records, incremental sync, external event bridge, selection following. |
 | `UI/` | WPF viewer window, custom chrome, themes, controls, settings dialogs, overlay windows. |
 | `Viewer/` | Helix viewport host, merged scene builder, camera logic, walk mode, section planes, wireframe, render settings. |
-| `Deploy/` | Revit `.addin` manifests for supported versions. |
+| `Deploy/` | Revit `.addin` manifest. |
 
 ## How the rendering model works
 
@@ -174,56 +173,61 @@ The viewport uses Helix Toolkit SharpDX with swap-chain rendering. This avoids t
 
 Because the swap-chain render surface is a child HWND, normal WPF overlays cannot always draw above it. The orientation cube / compass is therefore hosted in a small owned overlay window that stays above the viewport.
 
+## Single-DLL packaging
+
+`IfcViewer.dll` is fully self-contained. At build time every dependency — managed NuGet assemblies **and** the native xBIM/OpenCascade geometry engine — is gzip-compressed and embedded as a resource (`EmbedDependencyLibs` target in the csproj). At runtime `Core/DependencyLoader.cs` extracts them once per build to `%LOCALAPPDATA%\RKTools\IfcViewer\libs\` and resolves assemblies from there.
+
+Deployment is exactly two files: `IfcViewer.dll` + `Deploy/IfcViewer.addin`.
+
+For a conventional loose-file build (all DLLs next to `IfcViewer.dll`) pass `-p:EmbedDependencies=false`.
+
 ## Build targets
 
-| Configuration | Target framework | Revit version | Output folder |
-|---|---:|---:|---|
-| `Debug2024` / `Release2024` | `net48` | Revit 2024 | `bin/2024/` |
-| `Debug2026` / `Release2026` | `net8.0-windows` | Revit 2026 | `bin/2026/` |
+| Configuration | Target framework | Revit version |
+|---|---:|---:|
+| `Debug2024` / `Release2024` | `net48` | Revit 2024 |
+| `Debug2026` / `Release2026` | `net8.0-windows` | Revit 2026 |
 
 The project multi-targets Revit 2024 and Revit 2026 because the Revit API runtime changed from .NET Framework to modern .NET.
 
+The Revit API is referenced from NuGet (`Nice3point.Revit.Api.*`), so **no local Revit installation is required to build** — any machine with the .NET SDK can compile both targets:
+
+```powershell
+dotnet build IfcViewer.csproj -c Release2024
+dotnet build IfcViewer.csproj -c Release2026
+```
+
 ## Prerequisites
 
-- Visual Studio 2022 or .NET SDK 8+.
-- Autodesk Revit 2024 and/or Revit 2026 installed.
-- Revit API DLLs available on the build machine.
+- .NET SDK 8+ (Visual Studio 2022 optional).
 - Windows x64.
-
-The project probes the standard Revit install locations first. Custom Revit paths can be passed during build:
-
-```powershell
-dotnet build IfcViewer.csproj -c Debug2026 -p:Revit2026Dir="E:\Revit 2026"
-dotnet build IfcViewer.csproj -c Debug2024 -p:Revit2024Dir="E:\Autodesk\Revit 2024"
-```
-
-Typical build command:
-
-```powershell
-dotnet build IfcViewer.csproj -c Debug2026
-```
+- On the *running* machine: Microsoft Visual C++ 2022 (v143) x64 runtime — required by the OpenCascade geometry engine; already present on any machine with Revit installed.
 
 ## Deployment
 
-Copy the compiled add-in output and the matching `.addin` manifest from `Deploy/` into the Revit add-ins folder:
+Copy the built `IfcViewer.dll` and the manifest from `Deploy/`:
 
 ```text
-%APPDATA%\Autodesk\Revit\Addins\2024\
-%APPDATA%\Autodesk\Revit\Addins\2026\
+%APPDATA%\Autodesk\Revit\Addins\<2024|2026>\IfcViewer.addin
+%APPDATA%\Autodesk\Revit\Addins\<2024|2026>\IfcViewer\IfcViewer.dll
 ```
 
-The add-in uses Costura.Fody for embedded dependencies where possible. Some xBIM / Helix related assemblies are intentionally copied as loose DLLs next to `IfcViewer.dll` and loaded through the add-in assembly resolver.
+Or let the build do it:
+
+```powershell
+dotnet build IfcViewer.csproj -c Release2026 -p:DeployAddin=true
+```
 
 ## Key dependencies
 
 | Package | Purpose |
 |---|---|
-| `Xbim.Essentials`, `Xbim.Geometry` | IFC parsing and geometry generation. |
+| `Xbim.Essentials` 6.x, `Xbim.Geometry` 6.x | IFC parsing and geometry generation (runs on both net48 and net8). |
 | `HelixToolkit.Wpf.SharpDX` | Direct3D 11 viewport and GPU rendering. |
+| `Nice3point.Revit.Api.*` | Revit API reference assemblies from NuGet. |
 | `MaterialDesignThemes`, `MaterialDesignColors` | WPF control styling. |
 | `Newtonsoft.Json` | Settings and persisted viewer state. |
 | `ricaun.Revit.UI` | Revit ribbon helpers and app loading. |
-| `Costura.Fody` | Dependency embedding for simpler deployment. |
 
 ## Current limitations / design notes
 
@@ -231,7 +235,7 @@ The add-in uses Costura.Fody for embedded dependencies where possible. Some xBIM
 - Revit sync is based on exported visible geometry from a 3D view.
 - Section planes are viewer clip planes, not Revit section views.
 - The viewer prioritizes smooth navigation and inspection over exact Revit visual parity.
-- Some dependencies are embedded, while others are copied loose because of Revit runtime and package compatibility requirements.
+- All dependencies (managed and native) are embedded into `IfcViewer.dll` and extracted at runtime by the dependency loader, so deployment is a single DLL plus the `.addin` manifest.
 
 ## Roadmap ideas
 

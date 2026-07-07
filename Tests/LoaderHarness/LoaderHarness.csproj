@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net48;net8.0-windows</TargetFrameworks>
+    <PlatformTarget>x64</PlatformTarget>
+    <UseWPF>true</UseWPF>
+    <LangVersion>latest</LangVersion>
+    <NoWarn>NU1701;CA1416;NU5104</NoWarn>
+  </PropertyGroup>
+
+  <!-- Compile-time only — at runtime these must resolve through IfcViewer's
+       DependencyLoader, exactly like inside Revit. -->
+  <ItemGroup>
+    <PackageReference Include="Xbim.Essentials" Version="6.0.587" ExcludeAssets="runtime;contentFiles;build;buildTransitive;native" />
+    <PackageReference Include="Xbim.Geometry" Version="6.3.891-netcore" ExcludeAssets="runtime;contentFiles;build;buildTransitive;native" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="*.ifc" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

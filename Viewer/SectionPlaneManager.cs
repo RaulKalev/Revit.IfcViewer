@@ -1,26 +1,40 @@
 using HelixToolkit.Wpf.SharpDX;
 using SharpDX;
 using System.Collections.Generic;
-using Media3D = System.Windows.Media.Media3D;
 
 namespace IfcViewer.Viewer
 {
+    /// <summary>One section plane: a world-space normal pointing INTO the removed
+    /// half-space, and a point on the plane.</summary>
+    public struct SectionPlaneDef
+    {
+        public readonly Vector3 Normal;
+        public readonly Vector3 Point;
+
+        public SectionPlaneDef(Vector3 normal, Vector3 point)
+        {
+            Normal = normal;
+            Point  = point;
+        }
+    }
+
     /// <summary>
-    /// Manages a single arbitrary section plane applied to every mesh in the scene.
-    ///
-    /// The plane is defined by a world-space normal and a point that lies on the plane.
-    /// Call <see cref="SetPlane"/> whenever the user picks a new face.
+    /// Manages up to four arbitrary section planes applied to every mesh in the scene.
+    /// Call <see cref="SetPlanes"/> whenever the plane set changes.
     ///
     /// Meshes are loaded as plain <see cref="MeshGeometryModel3D"/> (cheap Blinn-Phong
-    /// shader). When the section plane is enabled, this manager swaps each registered mesh
+    /// shader). When sectioning is enabled, this manager swaps each registered mesh
     /// to a <see cref="CrossSectionMeshGeometryModel3D"/> in-place inside its parent group,
-    /// then applies the clip plane. When disabled it swaps them back to plain meshes.
+    /// then applies the clip planes. When disabled it swaps them back to plain meshes.
     ///
-    /// Also owns a semi-transparent blue quad that visualises the plane position.
-    /// Call <see cref="AttachVisual"/> once on the UI thread.
+    /// The interactive workflow and plane visuals live in
+    /// <see cref="SectionPlaneController"/>; this class owns only the clipping.
     /// </summary>
     public sealed class SectionPlaneManager
     {
+        /// <summary>Maximum number of simultaneous section planes.</summary>
+        public const int MaxPlanes = 4;
+
         // ── Registered mesh entries ───────────────────────────────────────────
         private sealed class MeshEntry
         {
@@ -32,21 +46,8 @@ namespace IfcViewer.Viewer
         private readonly List<MeshEntry> _entries = new List<MeshEntry>();
 
         // ── Backing fields ────────────────────────────────────────────────────
-        private bool    _enabled;
-        private Vector3 _normal      = new Vector3(0, 0, 1);   // default: Z-up
-        private Vector3 _pointOnPlane = Vector3.Zero;
-
-        // ── Visual quad ──────────────────────────────────────────────────────
-        private MeshGeometryModel3D _planeVisual;
-        private GroupModel3D        _visualParent;
-        private const float         QuadHalfSize = 500f;
-
-        /// <summary>
-        /// The semi-transparent plane quad mesh, or <c>null</c> before
-        /// <see cref="AttachVisual"/> is called.  Exposed so callers can skip it
-        /// when collecting scene meshes (e.g. wireframe / outline helpers).
-        /// </summary>
-        public MeshGeometryModel3D PlaneVisual => _planeVisual;
+        private bool _enabled;
+        private readonly List<SectionPlaneDef> _planes = new List<SectionPlaneDef>(MaxPlanes);
 
         // ── Public API ────────────────────────────────────────────────────────
 
@@ -61,63 +62,23 @@ namespace IfcViewer.Viewer
                     UpgradeAll();   // plain → CrossSection + apply clip
                 else
                     DowngradeAll(); // CrossSection → plain (removes expensive shader)
-                UpdateVisual();
             }
         }
 
         /// <summary>
-        /// Define the section plane from a world-space face normal and a point on that face.
-        /// The plane clips everything on the side the normal points towards.
+        /// Replace the active plane set (first <see cref="MaxPlanes"/> are used).
+        /// Each plane clips everything on the side its normal points towards; with
+        /// several planes the kept region is the intersection of the kept sides.
         /// </summary>
-        public void SetPlane(Vector3 normal, Vector3 pointOnPlane)
+        public void SetPlanes(IReadOnlyList<SectionPlaneDef> planes)
         {
-            _normal       = Vector3.Normalize(normal);
-            _pointOnPlane = pointOnPlane;
+            _planes.Clear();
+            if (planes != null)
+            {
+                for (int i = 0; i < planes.Count && i < MaxPlanes; i++)
+                    _planes.Add(planes[i]);
+            }
             if (_enabled) ApplyAll();
-            UpdateVisual();
-        }
-
-        // ── Visual attachment ─────────────────────────────────────────────────
-
-        /// <summary>
-        /// Create the blue transparent plane visual and add it to <paramref name="parent"/>.
-        /// Must be called on the WPF UI thread.
-        /// </summary>
-        public void AttachVisual(GroupModel3D parent)
-        {
-            if (_planeVisual != null) return;
-            _visualParent = parent;
-
-            var mesh = new MeshGeometry3D();
-            BuildQuad(mesh, QuadHalfSize);
-
-            var mat = new PhongMaterial
-            {
-                DiffuseColor      = new Color4(1.00f, 0.00f, 1.00f, 0.80f), // Bright magenta, mostly opaque
-                AmbientColor      = new Color4(0.50f, 0.00f, 0.50f, 0.80f),
-                SpecularColor     = new Color4(1f, 1f, 1f, 1f),
-                SpecularShininess = 10f,
-            };
-
-            _planeVisual = new MeshGeometryModel3D
-            {
-                Geometry      = mesh,
-                Material      = mat,
-                IsTransparent = true,
-                CullMode      = SharpDX.Direct3D11.CullMode.None // Make it double-sided
-            };
-
-            parent.Children.Add(_planeVisual);
-            UpdateVisual();
-        }
-
-        /// <summary>Remove and discard the plane visual from the scene.</summary>
-        public void DetachVisual()
-        {
-            if (_planeVisual == null) return;
-            _visualParent?.Children.Remove(_planeVisual);
-            _planeVisual  = null;
-            _visualParent = null;
         }
 
         // ── Mesh registration ─────────────────────────────────────────────────
@@ -238,6 +199,9 @@ namespace IfcViewer.Viewer
                 Material      = plain.Material,
                 IsTransparent = plain.IsTransparent,
                 Transform     = plain.Transform,
+                // Neutral cap colour drawn where the cut slices through closed
+                // solids (stencil fill; Helix's default is bright green).
+                CrossSectionColor = System.Windows.Media.Color.FromRgb(0xB4, 0xB4, 0xB4),
                 // Tag carries the MergedMeshInfo used to resolve hit-tests back to
                 // elements — it must survive the node swap.
                 Tag           = plain.Tag,
@@ -301,83 +265,35 @@ namespace IfcViewer.Viewer
 
         private void ApplyCross(CrossSectionMeshGeometryModel3D mesh)
         {
-            // Hessian-normal form: Plane(n, d) where d = -dot(n, pointOnPlane)
-            float d = -Vector3.Dot(_normal, _pointOnPlane);
-            mesh.Plane1           = new Plane(_normal, d);
-            mesh.EnablePlane1     = true;
-            mesh.CuttingOperation = CuttingOperation.Subtract;
+            mesh.CuttingOperation = CuttingOperation.Intersect;
+
+            mesh.EnablePlane1 = _planes.Count > 0;
+            if (_planes.Count > 0) mesh.Plane1 = ToShaderPlane(_planes[0]);
+            mesh.EnablePlane2 = _planes.Count > 1;
+            if (_planes.Count > 1) mesh.Plane2 = ToShaderPlane(_planes[1]);
+            mesh.EnablePlane3 = _planes.Count > 2;
+            if (_planes.Count > 2) mesh.Plane3 = ToShaderPlane(_planes[2]);
+            mesh.EnablePlane4 = _planes.Count > 3;
+            if (_planes.Count > 3) mesh.Plane4 = ToShaderPlane(_planes[3]);
         }
 
-        // ── Internal — visual ─────────────────────────────────────────────────
-
-        private void UpdateVisual()
+        /// <summary>
+        /// Helix's clip-plane shader does NOT use SharpDX's Hessian convention
+        /// (dot(n,x) + d = 0). It reconstructs the plane point as normal * D
+        /// (vsMeshDefault.hlsl: clipDistance = dot(n, wp - n * D)), i.e. it
+        /// expects D = +dot(n, pointOnPlane). Passing the Hessian d mirrors
+        /// the plane across the world origin — cuts then only look right for
+        /// planes that happen to mirror back into the model.
+        ///
+        /// Hardware clipping discards pixels with negative clip distance, so
+        /// the KEPT half-space is the side the shader normal points to. The
+        /// def normal points into the REMOVED half-space, so hand the shader
+        /// the opposite normal, with D measured along it.
+        /// </summary>
+        private static Plane ToShaderPlane(SectionPlaneDef def)
         {
-            if (_planeVisual == null) return;
-
-            _planeVisual.Visibility = _enabled
-                ? System.Windows.Visibility.Visible
-                : System.Windows.Visibility.Collapsed;
-
-            if (!_enabled) return;
-
-            // Build a rotation that brings the quad's Y-up normal (0,1,0) to align with _normal.
-            // We want the primary face of the quad to point OUT of the wall (along _normal)
-            // so it gets lit by the scene lights. (We reversed the clipping plane d-value elsewhere).
-            var n = _normal;
-            n.Normalize();
-
-            var yUpVec = new Media3D.Vector3D(0, 1, 0);
-            var targetVec = new Media3D.Vector3D(n.X, n.Y, n.Z);
-
-            double angle = Media3D.Vector3D.AngleBetween(yUpVec, targetVec);
-            Media3D.Vector3D axis;
-
-            if (angle < 0.1)
-            {
-                axis = new Media3D.Vector3D(1, 0, 0);
-                angle = 0;
-            }
-            else if (angle > 179.9)
-            {
-                axis = new Media3D.Vector3D(1, 0, 0);
-                angle = 180;
-            }
-            else
-            {
-                axis = Media3D.Vector3D.CrossProduct(yUpVec, targetVec);
-                axis.Normalize();
-            }
-
-            var xform = new Media3D.Transform3DGroup();
-            xform.Children.Add(new Media3D.RotateTransform3D(
-                new Media3D.AxisAngleRotation3D(axis, angle)));
-            xform.Children.Add(new Media3D.TranslateTransform3D(
-                _pointOnPlane.X, _pointOnPlane.Y, _pointOnPlane.Z));
-
-            _planeVisual.Transform = xform;
-        }
-
-        // ── Geometry helpers ──────────────────────────────────────────────────
-
-        private static void BuildQuad(MeshGeometry3D mesh, float half)
-        {
-            mesh.Positions = new Vector3Collection
-            {
-                new Vector3(-half, 0,  half),
-                new Vector3( half, 0,  half),
-                new Vector3( half, 0, -half),
-                new Vector3(-half, 0, -half),
-            };
-            mesh.Normals = new Vector3Collection
-            {
-                new Vector3(0, 1, 0), new Vector3(0, 1, 0),
-                new Vector3(0, 1, 0), new Vector3(0, 1, 0),
-            };
-            mesh.Indices = new IntCollection
-            {
-                0, 1, 2,  0, 2, 3,   // front
-                0, 2, 1,  0, 3, 2,   // back
-            };
+            var n = -def.Normal;
+            return new Plane(n, Vector3.Dot(n, def.Point));
         }
     }
 }

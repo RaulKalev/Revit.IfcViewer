@@ -134,18 +134,30 @@
     </None>
   </ItemGroup>
 
+  <!-- Locate the Revit installs. Probe the standard Program Files location
+       first, then known custom install drives; override from the command line
+       with -p:Revit2024Dir=... / -p:Revit2026Dir=... if needed. -->
+  <PropertyGroup>
+    <Revit2024Dir Condition="'$(Revit2024Dir)' == '' and Exists('C:\Program Files\Autodesk\Revit 2024\RevitAPI.dll')">C:\Program Files\Autodesk\Revit 2024</Revit2024Dir>
+    <Revit2024Dir Condition="'$(Revit2024Dir)' == '' and Exists('E:\Autodesk\Revit 2024\RevitAPI.dll')">E:\Autodesk\Revit 2024</Revit2024Dir>
+    <Revit2024Dir Condition="'$(Revit2024Dir)' == ''">C:\Program Files\Autodesk\Revit 2024</Revit2024Dir>
+    <Revit2026Dir Condition="'$(Revit2026Dir)' == '' and Exists('C:\Program Files\Autodesk\Revit 2026\RevitAPI.dll')">C:\Program Files\Autodesk\Revit 2026</Revit2026Dir>
+    <Revit2026Dir Condition="'$(Revit2026Dir)' == '' and Exists('E:\Revit 2026\RevitAPI.dll')">E:\Revit 2026</Revit2026Dir>
+    <Revit2026Dir Condition="'$(Revit2026Dir)' == ''">C:\Program Files\Autodesk\Revit 2026</Revit2026Dir>
+  </PropertyGroup>
+
   <!-- Revit 2024 (NET 4.8) -->
   <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
     <Reference Include="AdWindows">
-      <HintPath>C:\Program Files\Autodesk\Revit 2024\AdWindows.dll</HintPath>
+      <HintPath>$(Revit2024Dir)\AdWindows.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="RevitAPI">
-      <HintPath>C:\Program Files\Autodesk\Revit 2024\RevitAPI.dll</HintPath>
+      <HintPath>$(Revit2024Dir)\RevitAPI.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="RevitAPIUI">
-      <HintPath>C:\Program Files\Autodesk\Revit 2024\RevitAPIUI.dll</HintPath>
+      <HintPath>$(Revit2024Dir)\RevitAPIUI.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="System.Windows.Forms" />
@@ -155,15 +167,15 @@
   <!-- Revit 2026 (NET 8.0) -->
   <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
     <Reference Include="AdWindows">
-      <HintPath>C:\Program Files\Autodesk\Revit 2026\AdWindows.dll</HintPath>
+      <HintPath>$(Revit2026Dir)\AdWindows.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="RevitAPI">
-      <HintPath>C:\Program Files\Autodesk\Revit 2026\RevitAPI.dll</HintPath>
+      <HintPath>$(Revit2026Dir)\RevitAPI.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="RevitAPIUI">
-      <HintPath>C:\Program Files\Autodesk\Revit 2026\RevitAPIUI.dll</HintPath>
+      <HintPath>$(Revit2026Dir)\RevitAPIUI.dll</HintPath>
       <Private>False</Private>
     </Reference>
   </ItemGroup>

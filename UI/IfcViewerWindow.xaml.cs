@@ -91,6 +91,7 @@ namespace IfcViewer.UI
         // Stage 4a: first-person controller + section plane + settings
         private FirstPersonController _fpController;
         private SectionPlaneManager   _sectionMgr;
+        private SectionPlaneController _sectionController;
         private ViewerSettings        _settings;
         private ViewerFocusService    _viewerFocusService;
         private FollowSelectionService _followSelectionService;
@@ -121,6 +122,9 @@ namespace IfcViewer.UI
         private ElementHandle        _selectedHandle;
         private GroupModel3D         _selectionRoot;
         private System.Windows.Point _selectionMouseDown;
+        // Right-button down position — distinguishes a right-click (section plane
+        // flip) from a right-drag (camera orbit).
+        private System.Windows.Point _rightMouseDown;
         private readonly Stack<ElementHandle> _hiddenHandles = new Stack<ElementHandle>();
 
         // ── Cross-model duplicate suppression ─────────────────────────────────
@@ -388,6 +392,16 @@ namespace IfcViewer.UI
                     new MouseButtonEventHandler(Viewport_MouseLeftButtonUp),
                     handledEventsToo: true);
 
+                // Right-click (no drag) flips the section plane's cut direction.
+                // Helix's CameraController marks the orbit-ending right-up as
+                // handled, hence handledEventsToo. The down position is recorded
+                // both here and in the WinForms bridge (SwapChain_MouseDown).
+                _viewport.PreviewMouseRightButtonDown += (s, ev) =>
+                    _rightMouseDown = ev.GetPosition(_viewport);
+                _viewport.AddHandler(UIElement.MouseRightButtonUpEvent,
+                    new MouseButtonEventHandler(Viewport_MouseRightButtonUp),
+                    handledEventsToo: true);
+
                 // 5a. Wire custom mouse bindings once the template is applied.
                 //     UseDefaultGestures=false clears Helix's built-ins; we re-add only
                 //     what we want. The bindings go on the viewport itself — the
@@ -472,13 +486,30 @@ namespace IfcViewer.UI
                         return;
                     }
 
+                    if (ev.Key == Key.Escape && _sectionController != null
+                        && _sectionController.OnEscape())
+                    {
+                        ev.Handled = true;
+                        return;
+                    }
+
                     if (_fpController != null && !_fpController.IsActive && IsMovementKey(ev.Key))
                         ev.Handled = true;
                 };
 
-                // 9. Section plane manager + attach its visual quad to the scene root
+                // 9. Section planes: manager owns the GPU clipping, controller owns
+                //    the BIMcollab-style pick/place/move workflow and its visuals.
                 _sectionMgr = new SectionPlaneManager();
-                _sectionMgr.AttachVisual(_sceneRoot);
+                _sectionController = new SectionPlaneController(
+                    _viewport, _sceneRoot, _sectionMgr,
+                    boundsProvider: ComputeSceneBounds,
+                    status:         UpdateStatus,
+                    setCursor:      SetSectionCursor,
+                    pickEnded:      () =>
+                    {
+                        if (SectionAddToggle != null) SectionAddToggle.IsChecked = false;
+                    },
+                    showPlaneMenu:  ShowSectionPlaneMenu);
 
                 // 10. Follow-selection services
                 _viewerFocusService = new ViewerFocusService(_viewerHost.Camera);
@@ -581,7 +612,8 @@ namespace IfcViewer.UI
                 DetachCameraOrientationSync();
                 _followSelectionService?.Dispose();
                 _fpController?.Dispose();
-                _sectionMgr?.DetachVisual();
+                _sectionController?.Dispose();
+                _sectionController = null;
                 _syncRevitEvent?.Dispose();
                 _sceneRoot?.Children.Clear();
                 _viewport?.Items.Clear();
@@ -1309,6 +1341,11 @@ namespace IfcViewer.UI
             double dy = pos.Y - _selectionMouseDown.Y;
             if (dx * dx + dy * dy > 25) return;
 
+            // Section plane workflow gets first refusal: placing the plane,
+            // grabbing its rectangle, or dropping it after a move all consume
+            // the click so it never reaches element selection.
+            if (_sectionController != null && _sectionController.OnClick(pos)) return;
+
             // Hit-test the 3D scene at the click position.
             var hits = _viewport?.FindHits(pos);
 
@@ -1316,6 +1353,11 @@ namespace IfcViewer.UI
 
             foreach (var hit in hits)
             {
+                // Geometry clipped away by the section plane is invisible —
+                // don't let it swallow clicks meant for what's behind it.
+                if (_sectionController != null && _sectionController.IsHitClipped(hit))
+                    continue;
+
                 if (TryResolveHitHandle(hit, out ElementHandle handle))
                 {
                     SelectHandle(handle);
@@ -1324,6 +1366,22 @@ namespace IfcViewer.UI
             }
 
             ClearSelection();
+        }
+
+        /// <summary>
+        /// Right-click handler — opens the flip/delete menu when the click lands
+        /// on a section rectangle (flips directly while moving one).
+        /// Right-drags (camera orbit) are rejected by the 5 px threshold.
+        /// </summary>
+        private void Viewport_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            var pos = e.GetPosition(_viewport);
+            double dx = pos.X - _rightMouseDown.X;
+            double dy = pos.Y - _rightMouseDown.Y;
+            if (dx * dx + dy * dy > 25) return;
+
+            if (_sectionController != null && _sectionController.OnRightClick(pos))
+                e.Handled = true;
         }
 
         /// <summary>
@@ -3500,10 +3558,10 @@ namespace IfcViewer.UI
                 // Skip the selection highlight overlay — it duplicates geometry that
                 // is already collected from the merged meshes underneath.
                 if (ReferenceEquals(child, _selectionRoot))           continue;
-                // Skip the section-plane quad — it is a 500 m helper mesh, not
-                // building geometry, and would produce a giant diagonal line.
-                if (_sectionMgr != null &&
-                    ReferenceEquals(child, _sectionMgr.PlaneVisual)) continue;
+                // Skip the section-plane overlay visuals (preview + plane rect) —
+                // they are helper geometry, not building geometry.
+                if (_sectionController != null &&
+                    ReferenceEquals(child, _sectionController.VisualRoot)) continue;
                 // Skip hidden elements — wireframe/outline should only reflect
                 // what is actually visible on screen.
                 if (child.Visibility != Visibility.Visible) continue;
@@ -3609,82 +3667,150 @@ namespace IfcViewer.UI
             SessionLogger.Info("Walk mode deactivated.");
         }
 
-        // ── Section plane ─────────────────────────────────────────────────────
-        private void SectionPlane_Checked(object sender, RoutedEventArgs e)
+        // ── Section planes ────────────────────────────────────────────────────
+        private void SectionVisible_Checked(object sender, RoutedEventArgs e)
+            => _sectionController?.SetVisualsVisible(true);
+
+        private void SectionVisible_Unchecked(object sender, RoutedEventArgs e)
+            => _sectionController?.SetVisualsVisible(false);
+
+        private void SectionAdd_Checked(object sender, RoutedEventArgs e)
         {
-            if (_sectionMgr == null) return;
-            // Do NOT enable the plane yet — wait for the user to pick a face.
-            if (_viewport != null)
-                _viewport.AddHandler(UIElement.MouseRightButtonUpEvent,
-                    new MouseButtonEventHandler(SectionPlane_FacePick),
-                    handledEventsToo: true);
-            UpdateStatus("Section plane: right-click a face to set the cut plane.");
-            SessionLogger.Info("Section plane mode entered — awaiting face pick.");
+            if (_sectionController == null) return;
+
+            // Placing a plane while the rectangles are hidden would be invisible —
+            // force them back on.
+            if (SectionVisibleToggle != null) SectionVisibleToggle.IsChecked = true;
+
+            if (!_sectionController.BeginPick())
+                SectionAddToggle.IsChecked = false; // plane limit reached
         }
 
-        private void SectionPlane_Unchecked(object sender, RoutedEventArgs e)
+        private void SectionAdd_Unchecked(object sender, RoutedEventArgs e)
+            => _sectionController?.CancelPick();
+
+        private void SectionDeleteAll_Click(object sender, RoutedEventArgs e)
+            => _sectionController?.DeleteAll();
+
+        // Right-click flip/delete popup for a section plane. A plain Popup styled
+        // with the app theme brushes is used instead of a ContextMenu: the WPF
+        // menu template drags in half-themed chrome (white icon gutter) that
+        // clips the item text over the dark theme.
+        private System.Windows.Controls.Primitives.Popup _sectionMenuPopup;
+
+        /// <summary>
+        /// Right-click menu for one section plane (controller callback). A Popup
+        /// is a top-level HWND, so it renders fine above the swap-chain surface.
+        /// </summary>
+        private void ShowSectionPlaneMenu(object planeToken)
         {
-            if (_sectionMgr == null) return;
-            _sectionMgr.Enabled = false;
-            if (_viewport != null)
-                _viewport.RemoveHandler(UIElement.MouseRightButtonUpEvent,
-                    new MouseButtonEventHandler(SectionPlane_FacePick));
-            UpdateStatus("Section plane disabled.");
-            SessionLogger.Info("Section plane disabled.");
+            if (_sectionMenuPopup != null)
+            {
+                _sectionMenuPopup.IsOpen = false;
+                _sectionMenuPopup = null;
+            }
+
+            var panel = new StackPanel { MinWidth = 180 };
+            panel.Children.Add(CreateSectionMenuItem("Flip section plane",
+                () => _sectionController?.FlipPlane(planeToken)));
+            panel.Children.Add(CreateSectionMenuItem("Delete section plane",
+                () => _sectionController?.DeletePlane(planeToken)));
+
+            var border = new Border
+            {
+                Background      = TryFindResource("SecondaryBackgroundBrush") as Brush,
+                BorderBrush     = TryFindResource("BorderBrush") as Brush,
+                BorderThickness = new Thickness(1),
+                CornerRadius    = new CornerRadius(6),
+                Padding         = new Thickness(4),
+                Child           = panel,
+            };
+
+            _sectionMenuPopup = new System.Windows.Controls.Primitives.Popup
+            {
+                Child              = border,
+                PlacementTarget    = _viewport,
+                Placement          = System.Windows.Controls.Primitives.PlacementMode.MousePoint,
+                StaysOpen          = false, // outside click dismisses
+                AllowsTransparency = true,  // rounded corners without a white box
+            };
+            _sectionMenuPopup.IsOpen = true;
+        }
+
+        private UIElement CreateSectionMenuItem(string text, Action action)
+        {
+            var item = new Border
+            {
+                Background   = Brushes.Transparent,
+                CornerRadius = new CornerRadius(4),
+                Padding      = new Thickness(12, 7, 12, 7),
+                Cursor       = Cursors.Hand,
+                Child        = new TextBlock
+                {
+                    Text       = text,
+                    FontSize   = 12,
+                    Foreground = TryFindResource("TextBrush") as Brush ?? Brushes.White,
+                },
+            };
+
+            var hover = TryFindResource("SelectionHoverBrush") as Brush;
+            item.MouseEnter += (s, ev) => item.Background = hover ?? Brushes.Transparent;
+            item.MouseLeave += (s, ev) => item.Background = Brushes.Transparent;
+            item.MouseLeftButtonUp += (s, ev) =>
+            {
+                ev.Handled = true;
+                if (_sectionMenuPopup != null)
+                {
+                    _sectionMenuPopup.IsOpen = false;
+                    _sectionMenuPopup = null;
+                }
+                action();
+            };
+            return item;
         }
 
         /// <summary>
-        /// Right-click pick handler — active only while the section plane toggle is on.
-        /// Derives the cut plane from the face normal and hit point of the picked face.
+        /// Combined world bounds of every loaded model — sizes the section plane
+        /// rectangle so it frames the model's cross-section.
         /// </summary>
-        private void SectionPlane_FacePick(object sender, MouseButtonEventArgs e)
+        private BoundingBox? ComputeSceneBounds()
         {
-            if (_sectionMgr == null) return;
+            BoundingBox? total = null;
+            foreach (IfcModel m in _loadedModels)
+                total = total == null ? m.Bounds : BoundingBox.Merge(total.Value, m.Bounds);
+            if (_revitModel != null)
+                total = total == null ? _revitModel.Bounds : BoundingBox.Merge(total.Value, _revitModel.Bounds);
+            if (total.HasValue && total.Value.Maximum == total.Value.Minimum)
+                return null;
+            return total;
+        }
 
-            var pos  = e.GetPosition(_viewport);
-            var hits = _viewport?.FindHits(pos);
-            if (hits == null || hits.Count == 0) return;
-
-            // Enable the plane on the first successful pick (EnablePlane after SetPlane).
-
-            foreach (var hit in hits)
+        /// <summary>
+        /// Apply the section workflow's requested cursor. The render surface is a
+        /// WinForms child HWND, so its WinForms cursor must be set alongside the
+        /// WPF one (the WPF cursor never shows over the swap chain).
+        /// </summary>
+        private void SetSectionCursor(SectionPlaneCursor cursor)
+        {
+            System.Windows.Forms.Cursor wfCursor;
+            Cursor wpfCursor;
+            switch (cursor)
             {
-                var mesh = hit.ModelHit as MeshGeometryModel3D;
-                if (mesh == null) continue;
-
-                // Skip the plane-visual quad itself
-                if (_sectionMgr.PlaneVisual != null &&
-                    ReferenceEquals(mesh, _sectionMgr.PlaneVisual)) continue;
-
-                // NormalAtHit points out of the face. We want the section plane to cut INTO
-                // the object, so we must reverse the normal so the half-space subtracted
-                // is the volume behind the clicked face.
-                var rawNormal = hit.NormalAtHit;
-                var faceNormal = new SharpDX.Vector3(
-                    (float)-rawNormal.X, (float)-rawNormal.Y, (float)-rawNormal.Z);
-                if (faceNormal.LengthSquared() < 1e-6f) continue;
-                faceNormal = SharpDX.Vector3.Normalize(faceNormal);
-
-                // PointHit is already in world space for HelixToolkit SharpDX.
-                var hitPt = new SharpDX.Vector3(
-                    (float)hit.PointHit.X,
-                    (float)hit.PointHit.Y,
-                    (float)hit.PointHit.Z);
-                    
-                // Offset the plane slightly outward along the original (un-inverted) face normal 
-                // to prevent intense Z-buffer fighting between the visual quad and the newly cut edge.
-                hitPt += rawNormal * 0.05f;
-
-                _sectionMgr.SetPlane(faceNormal, hitPt);
-                _sectionMgr.Enabled = true;  // activate/update after plane is defined
-
-                UpdateStatus($"Section plane set — normal ({faceNormal.X:F2}, {faceNormal.Y:F2}, {faceNormal.Z:F2}).");
-                SessionLogger.Info($"Section plane set from face pick — normal {faceNormal}.");
-
-                // Prevent Helix from treating this right-click as a camera orbit start.
-                e.Handled = true;
-                return;
+                case SectionPlaneCursor.Crosshair:
+                    wfCursor  = System.Windows.Forms.Cursors.Cross;
+                    wpfCursor = Cursors.Cross;
+                    break;
+                case SectionPlaneCursor.Move:
+                    wfCursor  = System.Windows.Forms.Cursors.SizeAll;
+                    wpfCursor = Cursors.SizeAll;
+                    break;
+                default:
+                    wfCursor  = System.Windows.Forms.Cursors.Default;
+                    wpfCursor = Cursors.Arrow;
+                    break;
             }
+            if (_swapChainChild != null) _swapChainChild.Cursor = wfCursor;
+            if (_viewport != null)       _viewport.Cursor       = wpfCursor;
         }
 
         // ── Settings ──────────────────────────────────────────────────────────
@@ -3886,6 +4012,7 @@ namespace IfcViewer.UI
                 case System.Windows.Forms.Keys.Left:
                 case System.Windows.Forms.Keys.Right:
                 case System.Windows.Forms.Keys.Space:
+                case System.Windows.Forms.Keys.Escape:
                     e.IsInputKey = true;
                     break;
             }
@@ -3896,6 +4023,12 @@ namespace IfcViewer.UI
             Key key = KeyInterop.KeyFromVirtualKey((int)e.KeyCode);
 
             if (key == Key.Space && TryHandleSpacebar())
+            {
+                e.Handled = true;
+                return;
+            }
+
+            if (key == Key.Escape && _sectionController != null && _sectionController.OnEscape())
             {
                 e.Handled = true;
                 return;
@@ -3913,11 +4046,49 @@ namespace IfcViewer.UI
         private void SwapChain_MouseDown(object sender, System.Windows.Forms.MouseEventArgs e)
         {
             if (e.Button == System.Windows.Forms.MouseButtons.Right)
+            {
                 _fpController?.NotifyRightMouseDown(HostPointToDip(e));
+
+                // Record for the right-click-vs-orbit-drag test in
+                // Viewport_MouseRightButtonUp (WPF may not tunnel the down event
+                // over the swap-chain surface).
+                var p = SwapChainPointToViewport(e);
+                if (p.HasValue) _rightMouseDown = p.Value;
+            }
         }
 
         private void SwapChain_MouseMove(object sender, System.Windows.Forms.MouseEventArgs e)
-            => _fpController?.NotifyMouseMove(HostPointToDip(e));
+        {
+            _fpController?.NotifyMouseMove(HostPointToDip(e));
+
+            // Section workflow hover: face preview while picking, rect highlight
+            // while placed, plane sliding while moving.
+            if (_sectionController != null && _sectionController.IsInteractive)
+            {
+                var pos = SwapChainPointToViewport(e);
+                if (pos.HasValue) _sectionController.OnMouseMove(pos.Value);
+            }
+        }
+
+        /// <summary>
+        /// Convert a WinForms mouse position on the swap-chain surface to
+        /// viewport-relative DIPs (the coordinate space FindHits/UnProject expect).
+        /// Goes through screen coordinates so any offset between the host control
+        /// and the viewport is accounted for.
+        /// </summary>
+        private WpfPoint? SwapChainPointToViewport(System.Windows.Forms.MouseEventArgs e)
+        {
+            if (_swapChainChild == null || _viewport == null) return null;
+            try
+            {
+                var screen = _swapChainChild.PointToScreen(new System.Drawing.Point(e.X, e.Y));
+                return _viewport.PointFromScreen(new WpfPoint(screen.X, screen.Y));
+            }
+            catch
+            {
+                return null; // viewport not connected to a PresentationSource yet
+            }
+        }
 
         private void SwapChain_MouseUp(object sender, System.Windows.Forms.MouseEventArgs e)
         {

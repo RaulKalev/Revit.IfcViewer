@@ -203,15 +203,31 @@
                                       Style="{StaticResource CustomActionToggleButtonStyle}">
                             <materialDesign:PackIcon Kind="Walk" Width="20" Height="20"/>
                         </ToggleButton>
-                        <!-- Section plane -->
-                        <ToggleButton x:Name="SectionPlaneToggle"
-                                      Checked="SectionPlane_Checked"
-                                      Unchecked="SectionPlane_Unchecked"
+                        <!-- Section planes: visibility / add / delete all -->
+                        <ToggleButton x:Name="SectionVisibleToggle"
+                                      IsChecked="True"
+                                      Checked="SectionVisible_Checked"
+                                      Unchecked="SectionVisible_Unchecked"
                                       Width="32" Height="32" Margin="0,0,6,0"
-                                      ToolTip="Toggle section plane"
+                                      ToolTip="Show or hide the section plane rectangles (the cut stays active)"
+                                      Style="{StaticResource CustomActionToggleButtonStyle}">
+                            <materialDesign:PackIcon Kind="Eye" Width="20" Height="20"/>
+                        </ToggleButton>
+                        <ToggleButton x:Name="SectionAddToggle"
+                                      Checked="SectionAdd_Checked"
+                                      Unchecked="SectionAdd_Unchecked"
+                                      Width="32" Height="32" Margin="0,0,6,0"
+                                      ToolTip="Add section plane (max 4) — click a face to place the cut, click a rectangle to move it, right-click a rectangle for flip/delete"
                                       Style="{StaticResource CustomActionToggleButtonStyle}">
                             <materialDesign:PackIcon Kind="Scissors" Width="20" Height="20"/>
                         </ToggleButton>
+                        <Button x:Name="SectionDeleteButton"
+                                Click="SectionDeleteAll_Click"
+                                Width="32" Height="32" Margin="0,0,6,0"
+                                ToolTip="Delete all section planes"
+                                Style="{StaticResource CustomActionButtonStyle}">
+                            <materialDesign:PackIcon Kind="Delete" Width="20" Height="20"/>
+                        </Button>
                         <Separator Width="1" Margin="4,4" Background="{DynamicResource BorderBrush}"/>
                         <!-- Settings -->
                         <Button x:Name="SettingsButton"

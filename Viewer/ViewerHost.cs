@@ -36,6 +36,16 @@ namespace IfcViewer.Viewer
         {
             EffectsManager = new DefaultEffectsManager();
 
+            // Log which GPU Helix selected so render-performance questions can be
+            // answered from the session log.
+            try
+            {
+                using (var factory = new SharpDX.DXGI.Factory1())
+                using (var adapter = factory.GetAdapter1(Math.Max(0, EffectsManager.AdapterIndex)))
+                    SessionLogger.Info($"Render adapter: {adapter.Description1.Description}");
+            }
+            catch { /* diagnostics only */ }
+
             Camera = new PerspectiveCamera
             {
                 Position          = DefaultPosition,

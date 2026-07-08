@@ -1,5 +1,6 @@
 using Autodesk.Revit.DB;
 using HelixToolkit.Wpf.SharpDX;
+using IfcViewer.Viewer;
 using SharpDX;
 using System;
 using System.Collections.Generic;
@@ -12,10 +13,10 @@ namespace IfcViewer.Revit
     /// Exports tessellated geometry from the active Revit 3D view using
     /// the Revit API's <see cref="CustomExporter"/> pipeline.
     ///
-    /// Each Revit element gets its own <see cref="MeshGeometryModel3D"/> (one mesh per
-    /// ElementId). This enables incremental updates via <see cref="ExportIncremental"/>:
-    /// only dirty (added/modified) elements are re-tessellated, and deleted elements
-    /// are removed directly from the live scene without a full re-export.
+    /// Geometry is merged into one mesh per colour for fast rendering; per-element
+    /// identity is kept via <see cref="ElementHandle"/> vertex ranges. Incremental
+    /// updates via <see cref="ExportIncremental"/> re-tessellate only dirty elements
+    /// and re-merge them with the retained buckets of unchanged elements.
     ///
     /// Threading: <see cref="Export"/> / <see cref="ExportIncremental"/> must be called
     /// on the Revit API thread. Helix WPF objects are marshalled to
@@ -90,138 +91,89 @@ namespace IfcViewer.Revit
 
         private static RevitModel BuildScene(RevitExportContext ctx, string viewName)
         {
-            var sceneGroup    = new GroupModel3D();
-            var allBounds     = new List<BoundingBox>();
-            var elementMeshes = new Dictionary<ElementId, MeshGeometryModel3D>();
-            int triCount      = 0;
-
-            foreach (var kv in ctx.ElementBuckets)
-            {
-                var bucket = kv.Value;
-                if (bucket.Indices.Count == 0) continue;
-
-                var mesh3d = BucketToMesh(bucket);
-                sceneGroup.Children.Add(mesh3d);
-                elementMeshes[kv.Key] = mesh3d;
-                triCount += bucket.Indices.Count / 3;
-
-                if (bucket.Positions.Count > 0)
-                {
-                    BoundingBox.FromPoints(bucket.Positions.ToArray(), out BoundingBox b);
-                    allBounds.Add(b);
-                }
-            }
-
-            BoundingBox bounds = allBounds.Count > 0
-                ? allBounds.Aggregate(BoundingBox.Merge)
-                : new BoundingBox();
-
-            SessionLogger.Info($"RevitExporter: {triCount} triangles — scene ready.");
-            return new RevitModel(viewName, sceneGroup, bounds,
-                elementMeshes.Count, triCount, elementMeshes, ctx.ElementInfos);
+            var buckets = new Dictionary<ElementId, ElementBucket>(ctx.ElementBuckets);
+            var infos   = new Dictionary<ElementId, RevitElementInfo>(ctx.ElementInfos);
+            return BuildMergedModel(viewName, buckets, infos);
         }
 
         // ── Incremental scene patcher (UI thread) ─────────────────────────────
+        //
+        // With merged-by-colour rendering there is no per-element mesh to swap, so an
+        // incremental sync re-merges the retained buckets (deleted removed, dirty
+        // replaced). Merging is pure buffer copying — the expensive tessellation was
+        // still limited to the dirty elements.
 
         private static RevitModel PatchScene(
             RevitExportContext ctx,
             ISet<ElementId>    deletedIds,
             RevitModel         previous)
         {
-            // Mutable copy of the element map — the SceneGroup is mutated in-place.
-            // Cast to IDictionary<,> for net48 compatibility (IReadOnlyDictionary copy
-            // constructor overload was added in .NET 8; IDictionary exists on all targets).
-            var elementMeshes = new Dictionary<ElementId, MeshGeometryModel3D>(
-                (IDictionary<ElementId, MeshGeometryModel3D>)previous.ElementMeshes);
-            var elementInfos  = new Dictionary<ElementId, RevitElementInfo>(
+            var buckets = new Dictionary<ElementId, ElementBucket>(previous.Buckets);
+            var infos   = new Dictionary<ElementId, RevitElementInfo>(
                 (IDictionary<ElementId, RevitElementInfo>)previous.ElementInfos);
-            var sceneGroup    = previous.SceneGroup;
-            int triCount      = previous.TriangleCount;
 
-            // 1. Remove deleted elements
             if (deletedIds != null)
             {
                 foreach (var id in deletedIds)
                 {
-                    if (!elementMeshes.TryGetValue(id, out var old)) continue;
-                    sceneGroup.Children.Remove(old);
-                    triCount -= old.Geometry?.Indices?.Count / 3 ?? 0;
-                    elementMeshes.Remove(id);
-                    elementInfos.Remove(id);
+                    buckets.Remove(id);
+                    infos.Remove(id);
                 }
             }
 
-            // 2. Replace / add dirty elements
             foreach (var kv in ctx.ElementBuckets)
+            {
+                if (kv.Value.Indices.Count == 0) { buckets.Remove(kv.Key); continue; }
+                buckets[kv.Key] = kv.Value;
+                if (ctx.ElementInfos.TryGetValue(kv.Key, out var info))
+                    infos[kv.Key] = info;
+            }
+
+            return BuildMergedModel(previous.DisplayName, buckets, infos);
+        }
+
+        // ── Shared merged-scene factory (UI thread) ───────────────────────────
+
+        private static RevitModel BuildMergedModel(
+            string displayName,
+            Dictionary<ElementId, ElementBucket>    buckets,
+            Dictionary<ElementId, RevitElementInfo> infos)
+        {
+            var builder = new MergedSceneBuilder();
+            var handles = new Dictionary<ElementId, ElementHandle>();
+            int triCount = 0;
+
+            foreach (var kv in buckets)
             {
                 var bucket = kv.Value;
                 if (bucket.Indices.Count == 0) continue;
 
-                // Remove old mesh if present (element was modified)
-                if (elementMeshes.TryGetValue(kv.Key, out var existing))
-                {
-                    sceneGroup.Children.Remove(existing);
-                    triCount -= existing.Geometry?.Indices?.Count / 3 ?? 0;
-                    elementMeshes.Remove(kv.Key);
-                }
+                infos.TryGetValue(kv.Key, out RevitElementInfo info);
+                var handle = new ElementHandle { Info = info };
+                handles[kv.Key] = handle;
 
-                var newMesh = BucketToMesh(bucket);
-                sceneGroup.Children.Add(newMesh);
-                elementMeshes[kv.Key] = newMesh;
+                builder.AddElement(handle, bucket.Colour, bucket.Colour.Alpha < 0.99f,
+                                   bucket.Positions, bucket.Normals, bucket.Indices);
                 triCount += bucket.Indices.Count / 3;
-
-                // Update element info for modified/added elements
-                if (ctx.ElementInfos.TryGetValue(kv.Key, out var info))
-                    elementInfos[kv.Key] = info;
             }
 
-            // Recalculate bounds from all surviving meshes
-            var allBounds = new List<BoundingBox>();
-            foreach (var mesh in elementMeshes.Values)
+            List<MergedMeshInfo> merged = builder.BuildGeometries();
+
+            var sceneGroup = new GroupModel3D();
+            BoundingBox bounds = new BoundingBox();
+            bool hasBounds = false;
+            foreach (var mi in merged)
             {
-                if (mesh.Geometry?.Positions?.Count > 0)
-                {
-                    BoundingBox.FromPoints(mesh.Geometry.Positions.ToArray(), out BoundingBox b);
-                    allBounds.Add(b);
-                }
+                sceneGroup.Children.Add(MergedSceneBuilder.CreateMeshNode(mi));
+                bounds = hasBounds ? BoundingBox.Merge(bounds, mi.Geometry.Bound) : mi.Geometry.Bound;
+                hasBounds = true;
             }
 
-            BoundingBox bounds = allBounds.Count > 0
-                ? allBounds.Aggregate(BoundingBox.Merge)
-                : previous.Bounds;
-
-            return new RevitModel(previous.DisplayName, sceneGroup, bounds,
-                elementMeshes.Count, triCount, elementMeshes, elementInfos);
-        }
-
-        // ── Shared mesh factory ───────────────────────────────────────────────
-
-        private static MeshGeometryModel3D BucketToMesh(ElementBucket bucket)
-        {
-            var helixGeom = new MeshGeometry3D
-            {
-                Positions = new Vector3Collection(bucket.Positions),
-                Normals   = new Vector3Collection(bucket.Normals),
-                Indices   = new IntCollection(bucket.Indices),
-            };
-
-            var mat = new PhongMaterial
-            {
-                DiffuseColor      = bucket.Colour,
-                // Small ambient floor so backlit faces receive a hint of light
-                // rather than going pitch-black; keeps colour legible on all sides.
-                AmbientColor      = new Color4(0.15f, 0.15f, 0.15f, 1f),
-                SpecularColor     = new Color4(0.05f, 0.05f, 0.05f, 1f),
-                SpecularShininess = 4f,
-                ReflectiveColor   = new Color4(0f, 0f, 0f, 0f),
-            };
-
-            return new MeshGeometryModel3D
-            {
-                Geometry      = helixGeom,
-                Material      = mat,
-                IsTransparent = bucket.Colour.Alpha < 0.99f,
-            };
+            SessionLogger.Info(
+                $"RevitExporter: {triCount} triangles, {handles.Count} elements, " +
+                $"{merged.Count} merged meshes — scene ready.");
+            return new RevitModel(displayName, sceneGroup, bounds,
+                handles.Count, triCount, handles, infos, buckets);
         }
     }
 

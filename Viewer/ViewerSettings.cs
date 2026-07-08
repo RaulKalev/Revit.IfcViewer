@@ -35,6 +35,14 @@ namespace IfcViewer.Viewer
         /// <summary>Perspective field of view in degrees.</summary>
         public double FieldOfView { get; set; } = 45.0;
 
+        // ── Rendering ─────────────────────────────────────────────────────────
+        /// <summary>
+        /// Screen-space ambient occlusion. Darkens corners/contact zones for easier
+        /// shape reading, but costs several full-resolution GPU passes per frame —
+        /// off by default in favour of frame rate.
+        /// </summary>
+        public bool EnableSsao { get; set; } = false;
+
         // ── Follow selection ─────────────────────────────────────────────────
         /// <summary>
         /// When enabled, selecting an element in Revit automatically frames the

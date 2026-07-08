@@ -126,6 +126,42 @@ namespace IfcViewer.Viewer
             Deactivate();
         }
 
+        // ── External input bridge ────────────────────────────────────────────
+        // The swap-chain render host is a WinForms child HWND: it takes Win32
+        // focus and does not raise WPF keyboard or MouseMove events, so the
+        // window feeds input here directly from the WinForms control's events.
+
+        public void NotifyKeyDown(Key key)
+        {
+            if (_active) _keysDown.Add(key);
+        }
+
+        public void NotifyKeyUp(Key key)
+        {
+            if (_active) _keysDown.Remove(key);
+        }
+
+        public void NotifyRightMouseDown(System.Windows.Point pos)
+        {
+            if (!_active) return;
+            _mouseLooking = true;
+            _lastMousePos = pos;
+        }
+
+        public void NotifyMouseMove(System.Windows.Point pos)
+        {
+            if (!_active || !_mouseLooking) return;
+            ApplyLookDelta(pos);
+        }
+
+        public void NotifyRightMouseUp()
+        {
+            // StopMouseLook also releases the WPF mouse capture that OnMouseDown may
+            // have taken via the forwarded preview event — the forwarded mouse-up
+            // never reaches the WPF Preview route, so it must be released here.
+            StopMouseLook();
+        }
+
         // ── Timer tick: move camera ───────────────────────────────────────────
 
         private void OnTick(object sender, EventArgs e)
@@ -223,8 +259,12 @@ namespace IfcViewer.Viewer
         private void OnMouseMove(object sender, MouseEventArgs e)
         {
             if (!_active || !_mouseLooking) return;
+            ApplyLookDelta(e.GetPosition(_mouseTarget));
+            e.Handled = true; // stops Helix from panning/rotating on the same move
+        }
 
-            var pos   = e.GetPosition(_mouseTarget);
+        private void ApplyLookDelta(System.Windows.Point pos)
+        {
             double dx = pos.X - _lastMousePos.X;
             double dy = pos.Y - _lastMousePos.Y;
             _lastMousePos = pos;
@@ -238,7 +278,6 @@ namespace IfcViewer.Viewer
             GetVectors(_yaw, _pitch, out var forward, out _, out _);
             _camera.LookDirection = ToWpf(forward);
             _camera.UpDirection   = new Media3D.Vector3D(0, 1, 0);
-            e.Handled = true; // stops Helix from panning/rotating on the same move
         }
 
         private void StopMouseLook()

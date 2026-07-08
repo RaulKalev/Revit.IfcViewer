@@ -55,6 +55,7 @@ namespace IfcViewer.UI
 
             FovSlider.Value        = _settings.FieldOfView;
             FollowDistanceSlider.Value = _settings.FollowSelectionDistanceMultiplier;
+            SsaoCheckBox.IsChecked = _settings.EnableSsao;
 
             _loading = false;
             RefreshLabels();
@@ -138,6 +139,15 @@ namespace IfcViewer.UI
             UpdateApplyButtonState();
         }
 
+        private void Ssao_Changed(object sender, RoutedEventArgs e)
+        {
+            if (_loading || _settings == null) return;
+            _settings.EnableSsao = SsaoCheckBox.IsChecked == true;
+            _hasChanges = true;
+            _onChange?.Invoke();
+            UpdateApplyButtonState();
+        }
+
         private void UpdateApplyButtonState()
         {
             if (ApplyButton != null)
@@ -158,6 +168,7 @@ namespace IfcViewer.UI
             _settings.FollowSelectionDebounceMs = 220;
             _settings.FollowSelectionSpatialToleranceMm = 200.0;
             _settings.FollowSelectionDistanceMultiplier = 2.0;
+            _settings.EnableSsao = false;
 
             LoadFromSettings();
             _hasChanges = true;

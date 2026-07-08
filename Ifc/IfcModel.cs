@@ -1,4 +1,5 @@
 using HelixToolkit.Wpf.SharpDX;
+using IfcViewer.Viewer;
 using SharpDX;
 using System.Collections.Generic;
 using System.IO;
@@ -8,6 +9,8 @@ namespace IfcViewer.Ifc
     /// <summary>
     /// Lightweight record representing one loaded IFC file.
     /// Holds the Helix GroupModel3D (geometry) and metadata for display.
+    /// Geometry is merged by colour into a handful of large meshes; per-element
+    /// identity is preserved through <see cref="Handles"/> (vertex-range mapping).
     /// </summary>
     public sealed class IfcModel
     {
@@ -17,7 +20,7 @@ namespace IfcViewer.Ifc
         /// <summary>File name without extension, shown in the model list.</summary>
         public string DisplayName => Path.GetFileNameWithoutExtension(FilePath);
 
-        /// <summary>Root group containing all Helix meshes for this file.</summary>
+        /// <summary>Root group containing the merged colour meshes for this file.</summary>
         public GroupModel3D SceneGroup { get; }
 
         /// <summary>Axis-aligned bounding box of all loaded geometry.</summary>
@@ -30,22 +33,22 @@ namespace IfcViewer.Ifc
         public int TriangleCount { get; }
 
         /// <summary>
-        /// Maps each per-element mesh to its extracted IFC properties.
-        /// Used by the properties panel when the user clicks an element.
+        /// One handle per IFC product with geometry. Each handle carries the element's
+        /// IfcElementInfo, its bounds, and its vertex ranges inside the merged meshes —
+        /// used for click-selection, hide/unhide, and Revit follow-selection.
         /// </summary>
-        public IReadOnlyDictionary<MeshGeometryModel3D, IfcElementInfo> ElementMap { get; }
+        public IReadOnlyList<ElementHandle> Handles { get; }
 
         public IfcModel(string filePath, GroupModel3D sceneGroup,
                         BoundingBox bounds, int meshCount, int triangleCount,
-                        IReadOnlyDictionary<MeshGeometryModel3D, IfcElementInfo> elementMap)
+                        IReadOnlyList<ElementHandle> handles)
         {
             FilePath      = filePath;
             SceneGroup    = sceneGroup;
             Bounds        = bounds;
             MeshCount     = meshCount;
             TriangleCount = triangleCount;
-            ElementMap    = elementMap
-                ?? new Dictionary<MeshGeometryModel3D, IfcElementInfo>();
+            Handles       = handles ?? new List<ElementHandle>();
         }
 
         public override string ToString() => DisplayName;

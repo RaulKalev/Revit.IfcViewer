@@ -38,6 +38,14 @@ namespace IfcViewer.Viewer
         public bool IsHidden;
 
         internal bool HasBounds;
+
+        /// <summary>
+        /// Total triangle surface area, lazily computed for cross-model duplicate
+        /// detection (-1 = not computed yet). Area is tessellation-independent, so
+        /// it identifies congruent elements even when two exporters mesh the same
+        /// object differently.
+        /// </summary>
+        internal double CachedSurfaceArea = -1;
     }
 
     /// <summary>

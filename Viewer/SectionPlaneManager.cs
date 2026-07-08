@@ -242,6 +242,10 @@ namespace IfcViewer.Viewer
                 // elements — it must survive the node swap.
                 Tag           = plain.Tag,
                 Visibility    = plain.Visibility,
+                // Per-model depth bias (anti z-fighting between overlapping models)
+                // must survive the node swap too.
+                DepthBias             = plain.DepthBias,
+                SlopeScaledDepthBias  = plain.SlopeScaledDepthBias,
             };
             ApplyCross(cs);
 
@@ -270,6 +274,8 @@ namespace IfcViewer.Viewer
                 Transform     = cs.Transform,
                 Tag           = cs.Tag,
                 Visibility    = cs.Visibility,
+                DepthBias             = cs.DepthBias,
+                SlopeScaledDepthBias  = cs.SlopeScaledDepthBias,
             };
 
             int idx = entry.Parent.Children.IndexOf(cs);

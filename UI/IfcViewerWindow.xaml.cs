@@ -123,6 +123,26 @@ namespace IfcViewer.UI
         private System.Windows.Point _selectionMouseDown;
         private readonly Stack<ElementHandle> _hiddenHandles = new Stack<ElementHandle>();
 
+        // ── Cross-model duplicate suppression ─────────────────────────────────
+        // When several loaded models contain the same element (same IFC GlobalId
+        // or byte-identical geometry), only the copy from the earliest-loaded
+        // model is rendered; later copies are hidden. This removes z-fighting
+        // between overlapping models and skips their triangles entirely.
+        // Kept separate from _hiddenHandles so user hide/unhide actions never
+        // resurrect a suppressed duplicate.
+        private readonly HashSet<ElementHandle> _dedupHiddenHandles
+            = new HashSet<ElementHandle>();
+
+        // Depth bias assigned to the next attached IFC model. Later models get a
+        // larger bias, so coplanar faces that survive duplicate suppression
+        // (e.g. same wall plane with different extents) resolve deterministically
+        // in load order instead of shimmering. The live Revit model keeps bias 0
+        // and wins. The step is deliberately small: with walk mode's 0.001 m near
+        // plane one bias unit is worth ~z²/near · 6e-8 m of world depth, so large
+        // steps would visibly misorder genuinely separated geometry at a distance.
+        private const int DepthBiasStep = 8;
+        private int _nextIfcDepthBias = DepthBiasStep;
+
 
 
         // ── ViewCube compass ring ──────────────────────────────────────────────
@@ -462,6 +482,16 @@ namespace IfcViewer.UI
 
                 // 10. Follow-selection services
                 _viewerFocusService = new ViewerFocusService(_viewerHost.Camera);
+                // All scene handles, for line-of-sight tests when focusing an element.
+                _viewerFocusService.HandlesProvider = () =>
+                {
+                    var all = new List<ElementHandle>();
+                    foreach (IfcModel m in _loadedModels)
+                        all.AddRange(m.Handles);
+                    if (_revitModel?.Handles != null)
+                        all.AddRange(_revitModel.Handles.Values);
+                    return all;
+                };
                 _followSelectionService = new FollowSelectionService(
                     _uiApp, OnRevitPrimarySelectionChanged);
 
@@ -539,6 +569,7 @@ namespace IfcViewer.UI
                 _selectedHandle = null;
                 _selectionRoot?.Children.Clear();
                 _hiddenHandles.Clear();
+                _dedupHiddenHandles.Clear();
                 _ifcGuidHandleMap.Clear();
                 _ifcCatalogItems.Clear();
                 _ifcModelCache.Clear();
@@ -897,7 +928,11 @@ namespace IfcViewer.UI
             _viewerHost.IfcRoot.Children.Add(ifcModel.SceneGroup);
             _loadedModels.Add(ifcModel);
 
+            AssignDepthBias(ifcModel.SceneGroup, _nextIfcDepthBias);
+            _nextIfcDepthBias += DepthBiasStep;
+
             RebuildIfcGuidMap();
+            RecomputeDuplicateSuppression();
 
             _sectionMgr?.RegisterGroup(ifcModel.SceneGroup);
             RebuildOutline();
@@ -1001,11 +1036,28 @@ namespace IfcViewer.UI
                     RebuildMeshesFor(handle);
                 }
             }
+
+            if (_dedupHiddenHandles.Count > 0)
+            {
+                // Un-suppress this model's duplicates so a cached re-attach
+                // starts from the full geometry again.
+                var owners = new HashSet<MergedMeshInfo>();
+                foreach (ElementHandle handle in selected.Handles)
+                {
+                    if (!_dedupHiddenHandles.Remove(handle)) continue;
+                    handle.IsHidden = false;
+                    foreach (var part in handle.Parts)
+                        owners.Add(part.Owner);
+                }
+                foreach (var owner in owners)
+                    owner.RebuildVisibleIndices();
+            }
             RebuildIfcGuidMap();
 
             _sectionMgr?.UnregisterGroup(selected.SceneGroup);
             _viewerHost.IfcRoot.Children.Remove(selected.SceneGroup);
             _loadedModels.Remove(selected);
+            RecomputeDuplicateSuppression();
             SetCatalogLoadedState(selected.FilePath, false);
 
             if (removeFromCache)
@@ -1355,6 +1407,194 @@ namespace IfcViewer.UI
                 owner.RebuildVisibleIndices();
         }
 
+        // ── Cross-model duplicate suppression ─────────────────────────────────
+
+        /// <summary>Set the rasteriser depth bias on every merged mesh of a model.
+        /// The slope-scaled term separates coplanar faces whose different
+        /// triangulations interpolate depth differently on sloped screen areas,
+        /// where a constant bias alone is not enough.</summary>
+        private static void AssignDepthBias(GroupModel3D group, int bias)
+        {
+            foreach (var child in group.Children)
+            {
+                if (child is MeshGeometryModel3D mesh)
+                {
+                    mesh.DepthBias            = bias;
+                    mesh.SlopeScaledDepthBias = bias / (float)DepthBiasStep;
+                }
+            }
+        }
+
+        // Tolerances for geometric duplicate detection. Two elements from different
+        // models count as the same physical object when their world bounds agree
+        // within DedupBoundsTol on all six coordinates AND their total surface
+        // areas agree within DedupAreaRelTol. Bounds catch "same object, same
+        // place" across exporters (Revit/ArchiCAD vs Tekla re-exports regenerate
+        // GUIDs and re-tessellate); the area check — tessellation-independent —
+        // rejects different shapes that merely share a bounding box (e.g. a brace
+        // and a plate).
+        private const double DedupBoundsTol  = 0.01;  // metres
+        private const double DedupAreaRelTol = 0.05;
+        private const double DedupCellSize   = 0.25;  // spatial-hash cell, metres
+
+        /// <summary>
+        /// Hide elements that duplicate an element from an earlier-loaded model.
+        /// A duplicate is detected by IFC GlobalId or by geometric coincidence
+        /// (equal bounds + equal surface area, see tolerances above). Suppressed
+        /// elements are removed from the visible index buffers, so they cost no
+        /// draw time, cannot be picked, and no longer z-fight with the surviving
+        /// copy. Call on the UI thread after a model is attached or unloaded.
+        /// </summary>
+        private void RecomputeDuplicateSuppression()
+        {
+            // GUID → model that first claimed it (load order). Duplicates inside a
+            // single model are left alone; only cross-model copies are suppressed.
+            var guidClaims = new Dictionary<string, IfcModel>(StringComparer.Ordinal);
+            // Spatial hash over bounds centres of canonical (non-duplicate) handles.
+            var spatial = new Dictionary<(int X, int Y, int Z),
+                                         List<(ElementHandle Handle, IfcModel Model)>>();
+            var desired = new HashSet<ElementHandle>();
+
+            foreach (IfcModel model in _loadedModels)
+            {
+                foreach (ElementHandle handle in model.Handles)
+                {
+                    bool duplicate = false;
+
+                    string guidKey = NormalizeIfcGuid((handle.Info as IfcElementInfo)?.GlobalId);
+                    if (guidKey != null)
+                    {
+                        if (guidClaims.TryGetValue(guidKey, out IfcModel claimedBy))
+                            duplicate = !ReferenceEquals(claimedBy, model);
+                        else
+                            guidClaims[guidKey] = model;
+                    }
+
+                    if (!duplicate)
+                        duplicate = HasCoincidentTwin(spatial, handle, model);
+
+                    if (duplicate)
+                    {
+                        desired.Add(handle);
+                    }
+                    else
+                    {
+                        var cell = QuantizeCentre(handle.Bounds);
+                        if (!spatial.TryGetValue(cell, out var bucket))
+                            spatial[cell] = bucket = new List<(ElementHandle, IfcModel)>();
+                        bucket.Add((handle, model));
+                    }
+                }
+            }
+
+            // Apply only the difference between the current and desired sets.
+            var touched = new HashSet<MergedMeshInfo>();
+            foreach (ElementHandle handle in _dedupHiddenHandles)
+            {
+                if (desired.Contains(handle)) continue;
+                if (_hiddenHandles.Contains(handle)) continue; // still hidden by the user
+                handle.IsHidden = false;
+                foreach (var part in handle.Parts)
+                    touched.Add(part.Owner);
+            }
+            foreach (ElementHandle handle in desired)
+            {
+                if (_dedupHiddenHandles.Contains(handle)) continue;
+                handle.IsHidden = true;
+                foreach (var part in handle.Parts)
+                    touched.Add(part.Owner);
+            }
+
+            _dedupHiddenHandles.Clear();
+            foreach (ElementHandle handle in desired)
+                _dedupHiddenHandles.Add(handle);
+
+            foreach (MergedMeshInfo owner in touched)
+                owner.RebuildVisibleIndices();
+
+            if (touched.Count > 0 || desired.Count > 0)
+                SessionLogger.Info($"Duplicate suppression: {desired.Count} duplicate element(s) " +
+                                   $"hidden across {_loadedModels.Count} model(s).");
+        }
+
+        /// <summary>
+        /// True when a canonical handle from a different model geometrically
+        /// coincides with <paramref name="handle"/> (bounds within tolerance and
+        /// surface area within tolerance). Probes the 27 spatial-hash cells around
+        /// the handle's bounds centre so tolerance-sized offsets cannot straddle a
+        /// cell boundary undetected.
+        /// </summary>
+        private static bool HasCoincidentTwin(
+            Dictionary<(int X, int Y, int Z), List<(ElementHandle Handle, IfcModel Model)>> spatial,
+            ElementHandle handle, IfcModel model)
+        {
+            var c = QuantizeCentre(handle.Bounds);
+            for (int dx = -1; dx <= 1; dx++)
+            for (int dy = -1; dy <= 1; dy++)
+            for (int dz = -1; dz <= 1; dz++)
+            {
+                if (!spatial.TryGetValue((c.X + dx, c.Y + dy, c.Z + dz), out var bucket))
+                    continue;
+
+                foreach (var entry in bucket)
+                {
+                    if (ReferenceEquals(entry.Model, model)) continue;
+                    if (!BoundsCoincide(entry.Handle.Bounds, handle.Bounds)) continue;
+
+                    double a1 = GetSurfaceArea(entry.Handle);
+                    double a2 = GetSurfaceArea(handle);
+                    if (Math.Abs(a1 - a2) <= DedupAreaRelTol * Math.Max(a1, a2))
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        private static (int X, int Y, int Z) QuantizeCentre(BoundingBox b)
+        {
+            Vector3 c = b.Center;
+            return ((int)Math.Floor(c.X / DedupCellSize),
+                    (int)Math.Floor(c.Y / DedupCellSize),
+                    (int)Math.Floor(c.Z / DedupCellSize));
+        }
+
+        private static bool BoundsCoincide(BoundingBox a, BoundingBox b)
+        {
+            return Math.Abs(a.Minimum.X - b.Minimum.X) <= DedupBoundsTol
+                && Math.Abs(a.Minimum.Y - b.Minimum.Y) <= DedupBoundsTol
+                && Math.Abs(a.Minimum.Z - b.Minimum.Z) <= DedupBoundsTol
+                && Math.Abs(a.Maximum.X - b.Maximum.X) <= DedupBoundsTol
+                && Math.Abs(a.Maximum.Y - b.Maximum.Y) <= DedupBoundsTol
+                && Math.Abs(a.Maximum.Z - b.Maximum.Z) <= DedupBoundsTol;
+        }
+
+        /// <summary>
+        /// Total triangle area of an element, summed from the merged master buffers.
+        /// Cached on the handle — geometry never changes after load.
+        /// </summary>
+        private static double GetSurfaceArea(ElementHandle handle)
+        {
+            if (handle.CachedSurfaceArea >= 0) return handle.CachedSurfaceArea;
+
+            double doubleArea = 0;
+            foreach (var part in handle.Parts)
+            {
+                var pos = part.Owner.Geometry.Positions;
+                var idx = part.Owner.MasterIndices;
+                int end = part.IndexStart + part.IndexCount;
+                for (int i = part.IndexStart; i + 2 < end; i += 3)
+                {
+                    Vector3 a = pos[idx[i]];
+                    Vector3 b = pos[idx[i + 1]];
+                    Vector3 c = pos[idx[i + 2]];
+                    doubleArea += Vector3.Cross(b - a, c - a).Length();
+                }
+            }
+
+            handle.CachedSurfaceArea = doubleArea * 0.5;
+            return handle.CachedSurfaceArea;
+        }
+
         /// <summary>
         /// Populates the right-hand properties panel for an IFC element.
         /// Pass <c>null</c> to return to the "click an element" empty state.
@@ -1585,7 +1825,25 @@ namespace IfcViewer.UI
 
             Action focusAction = () =>
             {
-                if (_viewerFocusService?.FocusByWorldBounds(targetHandle.Bounds) == true)
+                var focus = _viewerFocusService;
+                if (focus == null) return;
+
+                // In walk mode, teleport instantly and re-sync the controller's
+                // yaw/pitch — otherwise the next look/move input would snap the
+                // camera back to its pre-focus orientation.
+                bool walking = _fpController?.IsActive == true;
+                int previousAnimation = focus.AnimationMilliseconds;
+                if (walking) focus.AnimationMilliseconds = 0;
+
+                bool focused = focus.FocusOnElement(targetHandle);
+
+                if (walking)
+                {
+                    focus.AnimationMilliseconds = previousAnimation;
+                    if (focused) _fpController.ResyncFromCamera();
+                }
+
+                if (focused)
                 {
                     SessionLogger.Info(
                         $"Follow selection: focused ElementId {elementId.Value} via {resolutionMode}.");

@@ -44,6 +44,7 @@ namespace IfcViewer.Viewer
 
         // Mouse-look state
         private bool                    _mouseLooking;
+        private bool                    _lookAnchored;
         private System.Windows.Point    _lastMousePos;
 
         // Yaw / pitch angles (radians) — derived from camera look direction on activation
@@ -126,6 +127,18 @@ namespace IfcViewer.Viewer
             Deactivate();
         }
 
+        /// <summary>
+        /// Re-derive yaw/pitch from the camera's current look direction after the
+        /// camera was moved externally (e.g. focus-on-element). Without this, the
+        /// next walk/look input would snap the view back to the stale angles
+        /// captured at activation.
+        /// </summary>
+        public void ResyncFromCamera()
+        {
+            if (!_active) return;
+            DecomposeLookDirection(_camera.LookDirection, out _yaw, out _pitch);
+        }
+
         // ── External input bridge ────────────────────────────────────────────
         // The swap-chain render host is a WinForms child HWND: it takes Win32
         // focus and does not raise WPF keyboard or MouseMove events, so the
@@ -145,7 +158,7 @@ namespace IfcViewer.Viewer
         {
             if (!_active) return;
             _mouseLooking = true;
-            _lastMousePos = pos;
+            _lookAnchored = false;
         }
 
         public void NotifyMouseMove(System.Windows.Point pos)
@@ -244,7 +257,7 @@ namespace IfcViewer.Viewer
             if (e.RightButton == MouseButtonState.Pressed)
             {
                 _mouseLooking = true;
-                _lastMousePos = e.GetPosition(_mouseTarget);
+                _lookAnchored = false;
                 _mouseTarget.CaptureMouse();
                 e.Handled = true; // stops Helix CameraController from also rotating
             }
@@ -265,6 +278,18 @@ namespace IfcViewer.Viewer
 
         private void ApplyLookDelta(System.Windows.Point pos)
         {
+            // The first move after right-button-down only anchors the reference
+            // position. Deltas are never taken against the button-down position:
+            // the down event may arrive via a different route (WinForms bridge vs
+            // forwarded WPF preview event) whose coordinate origin differs from the
+            // move stream's, which made the view jump sideways on every right-click.
+            if (!_lookAnchored)
+            {
+                _lastMousePos = pos;
+                _lookAnchored = true;
+                return;
+            }
+
             double dx = pos.X - _lastMousePos.X;
             double dy = pos.Y - _lastMousePos.Y;
             _lastMousePos = pos;

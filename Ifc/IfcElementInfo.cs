@@ -4,7 +4,7 @@ namespace IfcViewer.Ifc
 {
     /// <summary>
     /// Properties extracted from an IFC product during loading.
-    /// Stored in <see cref="IfcModel.ElementMap"/> alongside each mesh
+    /// Carried by each element's <see cref="IfcViewer.Viewer.ElementHandle"/>
     /// so the properties panel can display them when the user clicks an element.
     /// </summary>
     public class IfcElementInfo

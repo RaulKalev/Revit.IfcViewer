@@ -238,6 +238,10 @@ namespace IfcViewer.Viewer
                 Material      = plain.Material,
                 IsTransparent = plain.IsTransparent,
                 Transform     = plain.Transform,
+                // Tag carries the MergedMeshInfo used to resolve hit-tests back to
+                // elements — it must survive the node swap.
+                Tag           = plain.Tag,
+                Visibility    = plain.Visibility,
             };
             ApplyCross(cs);
 
@@ -264,6 +268,8 @@ namespace IfcViewer.Viewer
                 Material      = cs.Material,
                 IsTransparent = cs.IsTransparent,
                 Transform     = cs.Transform,
+                Tag           = cs.Tag,
+                Visibility    = cs.Visibility,
             };
 
             int idx = entry.Parent.Children.IndexOf(cs);

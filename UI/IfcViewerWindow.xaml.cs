@@ -40,6 +40,13 @@ namespace IfcViewer.UI
         [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wp, IntPtr lp);
         [DllImport("user32.dll")] private static extern bool ReleaseCapture();
 
+        // Win11 rounded corners for the borderless window (no-op on Win10).
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(
+            IntPtr hwnd, int attribute, ref int value, int size);
+        private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+        private const int DWMWCP_ROUND                   = 2;
+
         private const int WM_NCLBUTTONDOWN = 0xA1;
         private const int HTLEFT           = 10;
         private const int HTRIGHT          = 11;
@@ -55,6 +62,15 @@ namespace IfcViewer.UI
         private GroupModel3D _sceneRoot;
         private GroupModel3D _wireframeRoot;   // hard-edge line overlay
         private bool _isDarkTheme = true;
+
+        // Swap-chain input bridge: the render surface is a WinForms child HWND
+        // that owns Win32 focus — keyboard, mouse-move and wheel are read from
+        // its WinForms events and fed back into the WPF-side logic.
+        private System.Windows.Forms.Control _swapChainChild;
+
+        // Owned always-above window hosting the compass/orientation cube
+        // (WPF cannot draw over the swap-chain HWND — airspace).
+        private ViewportOverlayWindow _compassOverlay;
 
         // Loaded IFC models — bound to ModelListBox
         private readonly ObservableCollection<IfcModel> _loadedModels
@@ -79,8 +95,8 @@ namespace IfcViewer.UI
         private ViewerFocusService    _viewerFocusService;
         private FollowSelectionService _followSelectionService;
         private bool _applyingFollowSelectionState;
-        private readonly Dictionary<string, MeshGeometryModel3D> _ifcGuidMeshMap
-            = new Dictionary<string, MeshGeometryModel3D>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, ElementHandle> _ifcGuidHandleMap
+            = new Dictionary<string, ElementHandle>(StringComparer.OrdinalIgnoreCase);
         private static readonly string[] IfcGuidParameterNames = new[]
         {
             "IfcGUID",
@@ -99,16 +115,13 @@ namespace IfcViewer.UI
         private IfcModel _pendingReload;
 
         // Stage 5: Element selection + properties panel
-        // Flat maps of all loaded meshes → their extracted element info.
-        // IFC map maintained in sync with _loadedModels; Revit map rebuilt on each sync.
-        private readonly Dictionary<MeshGeometryModel3D, IfcElementInfo>   _ifcElementMap
-            = new Dictionary<MeshGeometryModel3D, IfcElementInfo>();
-        private readonly Dictionary<MeshGeometryModel3D, RevitElementInfo> _revitElementMap
-            = new Dictionary<MeshGeometryModel3D, RevitElementInfo>();
-        private MeshGeometryModel3D  _selectedMesh;
-        private Color4               _selectedOriginalEmissive;
+        // Geometry is merged by colour; per-element identity lives in ElementHandles
+        // (vertex ranges inside the merged meshes). Selection renders as a small
+        // depth-biased overlay mesh in _selectionRoot instead of a material swap.
+        private ElementHandle        _selectedHandle;
+        private GroupModel3D         _selectionRoot;
         private System.Windows.Point _selectionMouseDown;
-        private readonly Stack<MeshGeometryModel3D> _hiddenMeshes = new Stack<MeshGeometryModel3D>();
+        private readonly Stack<ElementHandle> _hiddenHandles = new Stack<ElementHandle>();
 
 
 
@@ -269,6 +282,18 @@ namespace IfcViewer.UI
             Loaded += OnWindowLoaded;
         }
 
+        protected override void OnSourceInitialized(EventArgs e)
+        {
+            base.OnSourceInitialized(e);
+            try
+            {
+                var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+                int pref = DWMWCP_ROUND;
+                DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref pref, sizeof(int));
+            }
+            catch { /* Win10 or older — square corners are fine */ }
+        }
+
         // ── Loaded: create Viewport3DX in code AFTER resolver is registered ──
         private void OnWindowLoaded(object sender, RoutedEventArgs e)
         {
@@ -287,10 +312,10 @@ namespace IfcViewer.UI
                     InfoBackground           = Brushes.Transparent,
                     TitleBackground          = Brushes.Transparent,
                     // SSAO — ambient occlusion darkens corners and contact zones, making
-                    // object shapes much easier to read in dense architectural models.
-                    // Sampling radius is in world units (metres); default is sub-metre
-                    // which is invisible at building scale — 1.5 m covers wall/floor corners.
-                    EnableSSAO               = true,
+                    // object shapes easier to read, but costs several full-resolution GPU
+                    // passes per frame. Off by default; user-toggled via Settings
+                    // (ApplySettings drives EnableSSAO from ViewerSettings.EnableSsao).
+                    EnableSSAO               = false,
                     SSAOSamplingRadius       = 1.5,
                     SSAOIntensity            = 1.5,
                     // MSAA off — pure technical viewer, FXAA is sufficient and costs ~0ms
@@ -309,42 +334,49 @@ namespace IfcViewer.UI
                     UseDefaultGestures       = false,
                     // Shadows off — pure technical viewer
                     IsShadowMappingEnabled   = false,
-                    // ── Built-in ViewCube ──────────────────────────────────────
-                    // Custom Revit-style texture applied below after construction.
-                    // Position: top-right (HorizontalPosition + VerticalPosition are
-                    // normalised device coords: +x = right, +y = top).
-                    ShowViewCube               = true,
-                    ViewCubeSize               = 80,
-                    ViewCubeHorizontalPosition = 0.75,
-                    ViewCubeVerticalPosition   = 0.90,
-                    IsViewCubeEdgeClicksEnabled = true,
-                    IsViewCubeMoverEnabled      = false,
+                    // ── Swap-chain rendering ───────────────────────────────────
+                    // DXGI swap chain in a child HWND instead of the WPF D3DImage
+                    // path. D3DImage's D3D11→D3D9 shared-surface copy is not
+                    // synchronized with WPF's composition read (visible tearing
+                    // during fast camera motion) and throttles the frame rate.
+                    // The swap chain presents vsynced directly to the compositor.
+                    // Costs: WPF elements cannot overlay the viewport (see the
+                    // ViewportOverlayWindow for the compass) and the WinForms
+                    // child needs the input bridge in HookSwapChainInput().
+                    EnableSwapChainRendering = true,
+                    // The WPF-rendered built-in ViewCube does not draw on the
+                    // swap-chain path; the custom compass/orientation cube overlay
+                    // provides view snapping instead.
+                    ShowViewCube             = false,
                 };
 
                 // 3. Scene root
                 _sceneRoot = new GroupModel3D();
                 _viewport.Items.Add(_sceneRoot);
 
-                // 4. Insert viewport as first child of ViewportContainer (behind the status bar)
-                // Give keyboard focus on any click so CameraController receives events.
-                _viewport.MouseDown += (s, ev) => _viewport.Focus();
+                // 4. Insert viewport into its host grid.
                 ViewportContainer.Children.Insert(0, _viewport);
 
-                // Hook left-click for element selection using PREVIEW (tunnel) events.
-                // Bubble events (MouseLeftButtonDown/Up) may be consumed by Helix's
-                // CameraController child before they reach our handlers; Preview events
-                // fire top-down, reaching the viewport before any child sees them.
+                // Hook element selection. The swap-chain host forwards WinForms mouse
+                // input as WPF events: mouse-down arrives as BOTH tunnel and bubble,
+                // but mouse-up is forwarded as the bubbling event only — so the down
+                // handler uses Preview and the up handler must listen on the bubble
+                // route (handledEventsToo, in case Helix's CameraController marks the
+                // rotation-ending mouse-up as handled).
                 _viewport.PreviewMouseLeftButtonDown += Viewport_MouseLeftButtonDown;
-                _viewport.PreviewMouseLeftButtonUp   += Viewport_MouseLeftButtonUp;
+                _viewport.AddHandler(UIElement.MouseLeftButtonUpEvent,
+                    new MouseButtonEventHandler(Viewport_MouseLeftButtonUp),
+                    handledEventsToo: true);
 
                 // 5a. Wire custom mouse bindings once the template is applied.
                 //     UseDefaultGestures=false clears Helix's built-ins; we re-add only
                 //     what we want. The bindings go on the viewport itself — the
                 //     CameraController child handles the matching RoutedCommands.
-                //     Convention: right-click drag = rotate, middle-click drag = pan,
-                //                 scroll wheel = zoom (Helix handles scroll internally).
+                //     Convention: right-click drag = rotate, middle-click drag = pan.
+                //     Wheel zoom is implemented by the input bridge (instant zoom), so
+                //     Helix's own animated wheel zoom is disabled to avoid doubling.
                 _viewport.IsPanEnabled    = true;
-                _viewport.IsZoomEnabled   = true;
+                _viewport.IsZoomEnabled   = false;
 
                 _viewport.Loaded += (s, ev) =>
                 {
@@ -360,10 +392,10 @@ namespace IfcViewer.UI
                         ViewportCommands.Pan,
                         new MouseGesture(MouseAction.MiddleClick)));
 
-                    // Note: Viewport3DX always uses DX11ImageSourceRenderHost (WPF D3DImage
-                    // path) regardless of AllowsTransparency. This architecture has no
-                    // GPU-level VSync — tearing is a known limitation of HelixToolkit.Wpf.SharpDX
-                    // inside a WPF window. No further throttle attempts are made here.
+                    // The swap-chain surface is a WinForms child HWND: it owns Win32
+                    // focus and raises no WPF keyboard/MouseMove/Wheel events, so
+                    // bridge those directly from the WinForms control.
+                    HookSwapChainInput();
                 };
 
                 // 5. Build test scene
@@ -373,11 +405,24 @@ namespace IfcViewer.UI
                 _wireframeRoot = new GroupModel3D();
                 _sceneRoot.Children.Add(_wireframeRoot);
 
+                // 5b². Selection overlay group — depth-biased highlight meshes for the
+                // currently selected element (merged meshes cannot be highlighted by
+                // swapping their material without lighting up the whole colour group).
+                _selectionRoot = new GroupModel3D();
+                _sceneRoot.Children.Add(_selectionRoot);
+
                 // 5c. Always-on outline removed — scene renders clean shaded meshes.
 
-                // 5d. ViewCube: apply Revit-style face texture and add compass ring.
-                _viewport.ViewCubeTexture = CreateRevitViewCubeTexture();
-                ViewportContainer.Children.Add(BuildCompassOverlay());
+                // 5d. Compass ring + orientation cube. These are WPF visuals that must
+                // overlap the 3D view, which the swap-chain HWND would cover — so they
+                // live in a small owned overlay window pinned to the viewport's
+                // top-right corner.
+                _compassOverlay = new ViewportOverlayWindow(
+                    this, ViewportContainer, BuildCompassOverlay(),
+                    width: 124, height: 102);
+                _compassOverlay.Show();
+                Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded,
+                    new Action(() => _compassOverlay?.Reposition()));
 
                 // Keep orientation overlays synced with camera motion (including
                 // animated transitions) and force redraw so the ViewCube updates.
@@ -490,16 +535,18 @@ namespace IfcViewer.UI
                 foreach (var w in _fileWatchers.Values) w.Dispose();
                 _fileWatchers.Clear();
 
-                // Clear selection state so no stale material references remain.
-                _selectedMesh = null;
-                _ifcElementMap.Clear();
-                _hiddenMeshes.Clear();
-                _revitElementMap.Clear();
-                _ifcGuidMeshMap.Clear();
+                // Clear selection state so no stale references remain.
+                _selectedHandle = null;
+                _selectionRoot?.Children.Clear();
+                _hiddenHandles.Clear();
+                _ifcGuidHandleMap.Clear();
                 _ifcCatalogItems.Clear();
                 _ifcModelCache.Clear();
 
                 this.PreviewMouseWheel -= OnPreviewMouseWheel;
+                UnhookSwapChainInput();
+                _compassOverlay?.Close();
+                _compassOverlay = null;
                 DetachCameraOrientationSync();
                 _followSelectionService?.Dispose();
                 _fpController?.Dispose();
@@ -850,8 +897,6 @@ namespace IfcViewer.UI
             _viewerHost.IfcRoot.Children.Add(ifcModel.SceneGroup);
             _loadedModels.Add(ifcModel);
 
-            foreach (var kvp in ifcModel.ElementMap)
-                _ifcElementMap[kvp.Key] = kvp.Value;
             RebuildIfcGuidMap();
 
             _sectionMgr?.RegisterGroup(ifcModel.SceneGroup);
@@ -936,18 +981,25 @@ namespace IfcViewer.UI
                 ReloadBanner.Visibility = Visibility.Collapsed;
             }
 
-            if (_selectedMesh != null && selected.ElementMap.ContainsKey(_selectedMesh))
+            if (_selectedHandle != null && selected.Handles.Contains(_selectedHandle))
                 ClearSelection();
 
-            foreach (var mesh in selected.ElementMap.Keys)
-                _ifcElementMap.Remove(mesh);
-
-            if (_hiddenMeshes.Count > 0)
+            if (_hiddenHandles.Count > 0)
             {
-                var kept = _hiddenMeshes.Where(m => !selected.ElementMap.ContainsKey(m)).ToList();
-                _hiddenMeshes.Clear();
+                // Drop this model's handles from the hidden stack and reset their
+                // hidden state so a cached re-attach shows the full model again.
+                var removed = new HashSet<ElementHandle>(selected.Handles);
+                var kept = _hiddenHandles.Where(h => !removed.Contains(h)).ToList();
+                var restore = _hiddenHandles.Where(h => removed.Contains(h)).ToList();
+                _hiddenHandles.Clear();
                 for (int i = kept.Count - 1; i >= 0; i--)
-                    _hiddenMeshes.Push(kept[i]);
+                    _hiddenHandles.Push(kept[i]);
+
+                foreach (var handle in restore)
+                {
+                    handle.IsHidden = false;
+                    RebuildMeshesFor(handle);
+                }
             }
             RebuildIfcGuidMap();
 
@@ -1065,17 +1117,10 @@ namespace IfcViewer.UI
             _sectionMgr?.RegisterGroup(_revitModel.SceneGroup);
 
 
-            // Rebuild the mesh → info reverse-map for hit-testing.
-            // If the currently selected mesh was a Revit element that no longer
-            // exists after an incremental patch, clear the selection.
-            _revitElementMap.Clear();
-            foreach (var kv in model.ElementMeshes)
-            {
-                if (model.ElementInfos.TryGetValue(kv.Key, out var info))
-                    _revitElementMap[kv.Value] = info;
-            }
-            if (_selectedMesh != null && !_ifcElementMap.ContainsKey(_selectedMesh)
-                                      && !_revitElementMap.ContainsKey(_selectedMesh))
+            // If the currently selected element was a Revit element, its handle is
+            // stale after any sync (the merged scene is rebuilt) — clear the selection.
+            if (_selectedHandle?.Info is RevitElementInfo
+                && !model.Handles.Values.Contains(_selectedHandle))
                 ClearSelection();
 
             if (fitCamera) _viewerHost.FitView(model.Bounds);
@@ -1129,14 +1174,17 @@ namespace IfcViewer.UI
 
         private bool TryHandleSpacebar()
         {
-            if (_selectedMesh != null)
+            if (_selectedHandle != null)
             {
-                _hiddenMeshes.Push(_selectedMesh);
-                _selectedMesh.Visibility = Visibility.Collapsed;
+                var handle = _selectedHandle;
                 ClearSelection();
 
-                // Rebuild wireframe/outline from visible meshes only — the hidden mesh's
-                // lines must not linger after the mesh itself disappears.
+                handle.IsHidden = true;
+                _hiddenHandles.Push(handle);
+                RebuildMeshesFor(handle);
+
+                // Rebuild wireframe/outline from visible geometry only — the hidden
+                // element's lines must not linger after its triangles disappear.
                 RebuildOutline();
                 if (WireframeToggle?.IsChecked == true)
                     RebuildWireframe();
@@ -1144,15 +1192,13 @@ namespace IfcViewer.UI
                 SessionLogger.Info("Hidden selected element.");
                 return true;
             }
-            else if (_hiddenMeshes.Count > 0)
+            else if (_hiddenHandles.Count > 0)
             {
-                var mesh = _hiddenMeshes.Pop();
-                mesh.Visibility = Visibility.Visible;
-                
-                if (_ifcElementMap.TryGetValue(mesh, out IfcElementInfo ifcInfo))
-                    SelectElement(mesh, ifcInfo);
-                else if (_revitElementMap.TryGetValue(mesh, out RevitElementInfo revitInfo))
-                    SelectElement(mesh, revitInfo);
+                var handle = _hiddenHandles.Pop();
+                handle.IsHidden = false;
+                RebuildMeshesFor(handle);
+
+                SelectHandle(handle);
 
                 RebuildOutline();
                 if (WireframeToggle?.IsChecked == true)
@@ -1169,13 +1215,18 @@ namespace IfcViewer.UI
 
         private void UnhideAll_Click(object sender, RoutedEventArgs e)
         {
-            if (_hiddenMeshes.Count == 0) return;
+            if (_hiddenHandles.Count == 0) return;
 
-            while (_hiddenMeshes.Count > 0)
+            var owners = new HashSet<MergedMeshInfo>();
+            while (_hiddenHandles.Count > 0)
             {
-                var mesh = _hiddenMeshes.Pop();
-                mesh.Visibility = Visibility.Visible;
+                var handle = _hiddenHandles.Pop();
+                handle.IsHidden = false;
+                foreach (var part in handle.Parts)
+                    owners.Add(part.Owner);
             }
+            foreach (var owner in owners)
+                owner.RebuildVisibleIndices();
 
             RebuildOutline();
             if (WireframeToggle?.IsChecked == true)
@@ -1213,17 +1264,9 @@ namespace IfcViewer.UI
 
             foreach (var hit in hits)
             {
-                var mesh = hit.ModelHit as MeshGeometryModel3D;
-                if (mesh == null) continue;
-
-                if (_ifcElementMap.TryGetValue(mesh, out IfcElementInfo ifcInfo))
+                if (TryResolveHitHandle(hit, out ElementHandle handle))
                 {
-                    SelectElement(mesh, ifcInfo);
-                    return;
-                }
-                if (_revitElementMap.TryGetValue(mesh, out RevitElementInfo revitInfo))
-                {
-                    SelectElement(mesh, revitInfo);
+                    SelectHandle(handle);
                     return;
                 }
             }
@@ -1231,56 +1274,85 @@ namespace IfcViewer.UI
             ClearSelection();
         }
 
-        /// <summary>Shared highlight logic — teal emissive glow on <paramref name="mesh"/>.</summary>
-        private void HighlightMesh(MeshGeometryModel3D mesh)
+        /// <summary>
+        /// Map a viewport hit back to the logical element. Merged meshes carry a
+        /// MergedMeshInfo in their Tag; the hit triangle's vertex index falls inside
+        /// exactly one element's vertex range.
+        /// </summary>
+        private static bool TryResolveHitHandle(
+            HelixToolkit.Wpf.SharpDX.HitTestResult hit, out ElementHandle handle)
         {
-            if (_selectedMesh != null && _selectedMesh.Material is PhongMaterial prev)
-                prev.EmissiveColor = _selectedOriginalEmissive;
-
-            _selectedMesh = mesh;
-
-            if (mesh.Material is PhongMaterial mat)
+            handle = null;
+            if (hit?.ModelHit is MeshGeometryModel3D mesh
+                && mesh.Tag is MergedMeshInfo merged
+                && hit.TriangleIndices != null)
             {
-                _selectedOriginalEmissive = mat.EmissiveColor;
-                mat.EmissiveColor = new Color4(0.08f, 0.42f, 0.42f, 1f);
+                handle = merged.HandleFromVertex(hit.TriangleIndices.Item1);
             }
+            return handle != null && !handle.IsHidden;
+        }
+
+        /// <summary>
+        /// Highlight <paramref name="handle"/> with a depth-biased overlay copy of its
+        /// geometry (teal emissive) and show its properties. All colour sub-parts of
+        /// the element highlight together.
+        /// </summary>
+        private void SelectHandle(ElementHandle handle)
+        {
+            if (handle == null) { ClearSelection(); return; }
+
+            _selectionRoot?.Children.Clear();
+            _selectedHandle = handle;
+
+            var emissive = new Color4(0.08f, 0.42f, 0.42f, 1f);
+            foreach (var part in handle.Parts)
+                _selectionRoot?.Children.Add(MergedSceneBuilder.CreateHighlightNode(part, emissive));
 
             // Orbit around the selected element's centre when right-dragging.
-            if (_viewport != null && mesh.Geometry != null)
+            if (_viewport != null)
             {
-                var bb = mesh.Geometry.Bound;
-                var c  = (bb.Minimum + bb.Maximum) * 0.5f;
+                var c = handle.Bounds.Center;
                 _viewport.FixedRotationPoint        = new Media3D.Point3D(c.X, c.Y, c.Z);
                 _viewport.FixedRotationPointEnabled = true;
             }
-        }
 
-        private void SelectElement(MeshGeometryModel3D mesh, IfcElementInfo info)
-        {
-            HighlightMesh(mesh);
-            ShowElementProperties(info);
-            SessionLogger.Info($"Selected IFC: {info.Type} \"{info.Name}\"");
-        }
-
-        private void SelectElement(MeshGeometryModel3D mesh, RevitElementInfo info)
-        {
-            HighlightMesh(mesh);
-            ShowElementProperties(info);
-            SessionLogger.Info($"Selected Revit: {info.Category} \"{info.Name}\"");
+            if (handle.Info is IfcElementInfo ifcInfo)
+            {
+                ShowElementProperties(ifcInfo);
+                SessionLogger.Info($"Selected IFC: {ifcInfo.Type} \"{ifcInfo.Name}\"");
+            }
+            else if (handle.Info is RevitElementInfo revitInfo)
+            {
+                ShowElementProperties(revitInfo);
+                SessionLogger.Info($"Selected Revit: {revitInfo.Category} \"{revitInfo.Name}\"");
+            }
+            else
+            {
+                HideProperties();
+            }
         }
 
         /// <summary>Removes the current highlight and clears the properties panel.</summary>
         private void ClearSelection()
         {
-            if (_selectedMesh != null && _selectedMesh.Material is PhongMaterial mat)
-                mat.EmissiveColor = _selectedOriginalEmissive;
-
-            _selectedMesh = null;
+            _selectionRoot?.Children.Clear();
+            _selectedHandle = null;
             HideProperties();
 
             // Restore default orbit behaviour (scene-centre / mouse-down pivot).
             if (_viewport != null)
                 _viewport.FixedRotationPointEnabled = false;
+        }
+
+        /// <summary>Rebuild the visible index buffers of every merged mesh containing
+        /// a part of <paramref name="handle"/> (after a hide/unhide toggle).</summary>
+        private static void RebuildMeshesFor(ElementHandle handle)
+        {
+            var owners = new HashSet<MergedMeshInfo>();
+            foreach (var part in handle.Parts)
+                owners.Add(part.Owner);
+            foreach (var owner in owners)
+                owner.RebuildVisibleIndices();
         }
 
         /// <summary>
@@ -1506,14 +1578,14 @@ namespace IfcViewer.UI
                 || elementId == Autodesk.Revit.DB.ElementId.InvalidElementId)
                 return;
 
-            MeshGeometryModel3D targetMesh;
+            ElementHandle targetHandle;
             string resolutionMode;
-            if (!TryResolveViewerMesh(uiDoc, elementId, out targetMesh, out resolutionMode))
+            if (!TryResolveViewerHandle(uiDoc, elementId, out targetHandle, out resolutionMode))
                 return;
 
             Action focusAction = () =>
             {
-                if (_viewerFocusService?.FocusByMesh(targetMesh) == true)
+                if (_viewerFocusService?.FocusByWorldBounds(targetHandle.Bounds) == true)
                 {
                     SessionLogger.Info(
                         $"Follow selection: focused ElementId {elementId.Value} via {resolutionMode}.");
@@ -1524,18 +1596,18 @@ namespace IfcViewer.UI
             else Dispatcher.BeginInvoke(focusAction);
         }
 
-        private bool TryResolveViewerMesh(
+        private bool TryResolveViewerHandle(
             UIDocument uiDoc,
             Autodesk.Revit.DB.ElementId elementId,
-            out MeshGeometryModel3D mesh,
+            out ElementHandle handle,
             out string resolutionMode)
         {
-            mesh = null;
+            handle = null;
             resolutionMode = null;
 
-            // A) Direct Revit ElementId → rendered mesh mapping.
-            if (_revitModel?.ElementMeshes != null
-                && _revitModel.ElementMeshes.TryGetValue(elementId, out mesh))
+            // A) Direct Revit ElementId → element handle mapping.
+            if (_revitModel?.Handles != null
+                && _revitModel.Handles.TryGetValue(elementId, out handle))
             {
                 resolutionMode = "ElementId";
                 return true;
@@ -1548,7 +1620,7 @@ namespace IfcViewer.UI
             // B) IFC GUID mapping (when IFC model is loaded and GUIDs are available).
             string ifcGuid;
             if (TryGetIfcGuid(element, out ifcGuid)
-                && _ifcGuidMeshMap.TryGetValue(ifcGuid, out mesh))
+                && _ifcGuidHandleMap.TryGetValue(ifcGuid, out handle))
             {
                 resolutionMode = "IFC GUID";
                 return true;
@@ -1565,7 +1637,7 @@ namespace IfcViewer.UI
                         _settings.FollowSelectionSpatialToleranceMm) / 1000f;
                 }
 
-                if (TryFindNearestRenderedMesh(center, toleranceM, out mesh))
+                if (TryFindNearestHandle(center, toleranceM, out handle))
                 {
                     resolutionMode = "spatial";
                     return true;
@@ -1678,50 +1750,40 @@ namespace IfcViewer.UI
             return true;
         }
 
-        private bool TryFindNearestRenderedMesh(
+        private bool TryFindNearestHandle(
             Vector3 point,
             float toleranceMeters,
-            out MeshGeometryModel3D nearestMesh)
+            out ElementHandle nearestHandle)
         {
-            nearestMesh = null;
+            nearestHandle = null;
 
             float bestDistSq = toleranceMeters * toleranceMeters;
-            Vector3 center;
 
-            foreach (MeshGeometryModel3D mesh in _ifcElementMap.Keys)
+            foreach (IfcModel model in _loadedModels)
             {
-                if (!TryGetMeshCenter(mesh, out center)) continue;
-                float distSq = (center - point).LengthSquared();
-                if (distSq > bestDistSq) continue;
-
-                bestDistSq = distSq;
-                nearestMesh = mesh;
-            }
-
-            if (_revitModel?.ElementMeshes != null)
-            {
-                foreach (MeshGeometryModel3D mesh in _revitModel.ElementMeshes.Values)
+                foreach (ElementHandle handle in model.Handles)
                 {
-                    if (!TryGetMeshCenter(mesh, out center)) continue;
-                    float distSq = (center - point).LengthSquared();
+                    float distSq = (handle.Bounds.Center - point).LengthSquared();
                     if (distSq > bestDistSq) continue;
 
                     bestDistSq = distSq;
-                    nearestMesh = mesh;
+                    nearestHandle = handle;
                 }
             }
 
-            return nearestMesh != null;
-        }
+            if (_revitModel?.Handles != null)
+            {
+                foreach (ElementHandle handle in _revitModel.Handles.Values)
+                {
+                    float distSq = (handle.Bounds.Center - point).LengthSquared();
+                    if (distSq > bestDistSq) continue;
 
-        private static bool TryGetMeshCenter(MeshGeometryModel3D mesh, out Vector3 center)
-        {
-            center = new Vector3();
-            if (mesh?.Geometry == null) return false;
+                    bestDistSq = distSq;
+                    nearestHandle = handle;
+                }
+            }
 
-            BoundingBox bb = mesh.Geometry.Bound;
-            center = (bb.Minimum + bb.Maximum) * 0.5f;
-            return true;
+            return nearestHandle != null;
         }
 
         private static Vector3 ToViewerPoint(Autodesk.Revit.DB.XYZ point)
@@ -1735,15 +1797,18 @@ namespace IfcViewer.UI
 
         private void RebuildIfcGuidMap()
         {
-            _ifcGuidMeshMap.Clear();
+            _ifcGuidHandleMap.Clear();
 
-            foreach (var kv in _ifcElementMap)
+            foreach (IfcModel model in _loadedModels)
             {
-                string key = NormalizeIfcGuid(kv.Value?.GlobalId);
-                if (string.IsNullOrEmpty(key)) continue;
-                if (_ifcGuidMeshMap.ContainsKey(key)) continue;
+                foreach (ElementHandle handle in model.Handles)
+                {
+                    string key = NormalizeIfcGuid((handle.Info as IfcElementInfo)?.GlobalId);
+                    if (string.IsNullOrEmpty(key)) continue;
+                    if (_ifcGuidHandleMap.ContainsKey(key)) continue;
 
-                _ifcGuidMeshMap[key] = kv.Key;
+                    _ifcGuidHandleMap[key] = handle;
+                }
             }
         }
 
@@ -3086,7 +3151,9 @@ namespace IfcViewer.UI
             _hasCameraSnapshot = true;
 
             UpdateOrientationCubeVisual();
-            _viewport.InvalidateVisual();
+            // InvalidateRender only flags the D3D render loop — InvalidateVisual here
+            // forced a full WPF layout pass every frame during camera motion.
+            _viewport.InvalidateRender();
         }
 
         private static bool IsClose(Media3D.Point3D a, Media3D.Point3D b)
@@ -3172,6 +3239,9 @@ namespace IfcViewer.UI
             foreach (var child in group.Children)
             {
                 if (ReferenceEquals(child, _wireframeRoot))           continue;
+                // Skip the selection highlight overlay — it duplicates geometry that
+                // is already collected from the merged meshes underneath.
+                if (ReferenceEquals(child, _selectionRoot))           continue;
                 // Skip the section-plane quad — it is a 500 m helper mesh, not
                 // building geometry, and would produce a giant diagonal line.
                 if (_sectionMgr != null &&
@@ -3287,7 +3357,9 @@ namespace IfcViewer.UI
             if (_sectionMgr == null) return;
             // Do NOT enable the plane yet — wait for the user to pick a face.
             if (_viewport != null)
-                _viewport.PreviewMouseRightButtonUp += SectionPlane_FacePick;
+                _viewport.AddHandler(UIElement.MouseRightButtonUpEvent,
+                    new MouseButtonEventHandler(SectionPlane_FacePick),
+                    handledEventsToo: true);
             UpdateStatus("Section plane: right-click a face to set the cut plane.");
             SessionLogger.Info("Section plane mode entered — awaiting face pick.");
         }
@@ -3297,7 +3369,8 @@ namespace IfcViewer.UI
             if (_sectionMgr == null) return;
             _sectionMgr.Enabled = false;
             if (_viewport != null)
-                _viewport.PreviewMouseRightButtonUp -= SectionPlane_FacePick;
+                _viewport.RemoveHandler(UIElement.MouseRightButtonUpEvent,
+                    new MouseButtonEventHandler(SectionPlane_FacePick));
             UpdateStatus("Section plane disabled.");
             SessionLogger.Info("Section plane disabled.");
         }
@@ -3415,6 +3488,10 @@ namespace IfcViewer.UI
             if (_viewerHost?.Camera != null)
                 _viewerHost.Camera.FieldOfView = _settings.FieldOfView;
 
+            // Rendering
+            if (_viewport != null)
+                _viewport.EnableSSAO = _settings.EnableSsao;
+
             // Follow Revit selection
             if (_followSelectionService != null)
             {
@@ -3446,14 +3523,21 @@ namespace IfcViewer.UI
         // ── Instant scroll-wheel zoom (no inertia) ────────────────────────────
 
         /// <summary>
-        /// Handle scroll-wheel zoom ourselves at the Window level so we can apply
-        /// an instant, fixed-step zoom and block Helix's smooth (inertia) zoom
-        /// before it ever fires.
+        /// Handle scroll-wheel zoom ourselves so we can apply an instant, fixed-step
+        /// zoom. Wheel events over the swap-chain surface arrive via the WinForms
+        /// bridge (SwapChain_MouseWheel); this WPF handler covers the rest of the
+        /// window. Helix's own animated zoom is disabled (IsZoomEnabled=false).
         /// </summary>
         private void OnPreviewMouseWheel(object sender, MouseWheelEventArgs e)
         {
-            if (_viewport == null || _viewerHost?.Camera == null) return;
-            if (_fpController != null && _fpController.IsActive) return; // walk mode handles its own speed
+            if (ApplyInstantZoom(e.Delta))
+                e.Handled = true;
+        }
+
+        private bool ApplyInstantZoom(int delta)
+        {
+            if (_viewport == null || _viewerHost?.Camera == null) return false;
+            if (_fpController != null && _fpController.IsActive) return false; // walk mode handles its own speed
 
             var cam = _viewerHost.Camera;
 
@@ -3464,7 +3548,7 @@ namespace IfcViewer.UI
             if (dist < 0.001) dist = 0.001;
 
             // Fraction to move per notch (delta comes in multiples of 120 for a standard wheel)
-            double fraction = _settings.ZoomStep * (e.Delta / 120.0);
+            double fraction = _settings.ZoomStep * (delta / 120.0);
             double move     = dist * fraction;
 
             // Normalise look direction and move position along it
@@ -3474,8 +3558,121 @@ namespace IfcViewer.UI
                 cam.Position.Y + lookDir.Y * move,
                 cam.Position.Z + lookDir.Z * move);
 
-            // Block Helix's own zoom handler completely
-            e.Handled = true;
+            return true;
+        }
+
+        // ── Swap-chain input bridge ───────────────────────────────────────────
+        // The swap-chain render surface (a WinForms control inside an HwndHost)
+        // owns Win32 focus while the user interacts with the 3D view. Helix
+        // forwards its mouse down/up to WPF, but keyboard, mouse-move and wheel
+        // events never reach the WPF input system — they are bridged here.
+
+        private void HookSwapChainInput()
+        {
+            if (_swapChainChild != null) return;
+
+            _swapChainChild = FindSwapChainChild(_viewport);
+            if (_swapChainChild == null)
+            {
+                SessionLogger.Warn("Swap-chain host control not found — input bridge inactive.");
+                return;
+            }
+
+            _swapChainChild.PreviewKeyDown += SwapChain_PreviewKeyDown;
+            _swapChainChild.KeyDown        += SwapChain_KeyDown;
+            _swapChainChild.KeyUp          += SwapChain_KeyUp;
+            _swapChainChild.MouseWheel     += SwapChain_MouseWheel;
+            _swapChainChild.MouseDown      += SwapChain_MouseDown;
+            _swapChainChild.MouseMove      += SwapChain_MouseMove;
+            _swapChainChild.MouseUp        += SwapChain_MouseUp;
+            SessionLogger.Info("Swap-chain input bridge attached.");
+        }
+
+        private void UnhookSwapChainInput()
+        {
+            if (_swapChainChild == null) return;
+            _swapChainChild.PreviewKeyDown -= SwapChain_PreviewKeyDown;
+            _swapChainChild.KeyDown        -= SwapChain_KeyDown;
+            _swapChainChild.KeyUp          -= SwapChain_KeyUp;
+            _swapChainChild.MouseWheel     -= SwapChain_MouseWheel;
+            _swapChainChild.MouseDown      -= SwapChain_MouseDown;
+            _swapChainChild.MouseMove      -= SwapChain_MouseMove;
+            _swapChainChild.MouseUp        -= SwapChain_MouseUp;
+            _swapChainChild = null;
+        }
+
+        private static System.Windows.Forms.Control FindSwapChainChild(DependencyObject root)
+        {
+            if (root == null) return null;
+            if (root is System.Windows.Forms.Integration.WindowsFormsHost host)
+                return host.Child;
+
+            int count = VisualTreeHelper.GetChildrenCount(root);
+            for (int i = 0; i < count; i++)
+            {
+                var found = FindSwapChainChild(VisualTreeHelper.GetChild(root, i));
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        private void SwapChain_PreviewKeyDown(object sender,
+            System.Windows.Forms.PreviewKeyDownEventArgs e)
+        {
+            // WinForms treats arrows/space as navigation keys and would not raise
+            // KeyDown for them without IsInputKey.
+            switch (e.KeyCode)
+            {
+                case System.Windows.Forms.Keys.Up:
+                case System.Windows.Forms.Keys.Down:
+                case System.Windows.Forms.Keys.Left:
+                case System.Windows.Forms.Keys.Right:
+                case System.Windows.Forms.Keys.Space:
+                    e.IsInputKey = true;
+                    break;
+            }
+        }
+
+        private void SwapChain_KeyDown(object sender, System.Windows.Forms.KeyEventArgs e)
+        {
+            Key key = KeyInterop.KeyFromVirtualKey((int)e.KeyCode);
+
+            if (key == Key.Space && TryHandleSpacebar())
+            {
+                e.Handled = true;
+                return;
+            }
+
+            _fpController?.NotifyKeyDown(key);
+        }
+
+        private void SwapChain_KeyUp(object sender, System.Windows.Forms.KeyEventArgs e)
+            => _fpController?.NotifyKeyUp(KeyInterop.KeyFromVirtualKey((int)e.KeyCode));
+
+        private void SwapChain_MouseWheel(object sender, System.Windows.Forms.MouseEventArgs e)
+            => ApplyInstantZoom(e.Delta);
+
+        private void SwapChain_MouseDown(object sender, System.Windows.Forms.MouseEventArgs e)
+        {
+            if (e.Button == System.Windows.Forms.MouseButtons.Right)
+                _fpController?.NotifyRightMouseDown(HostPointToDip(e));
+        }
+
+        private void SwapChain_MouseMove(object sender, System.Windows.Forms.MouseEventArgs e)
+            => _fpController?.NotifyMouseMove(HostPointToDip(e));
+
+        private void SwapChain_MouseUp(object sender, System.Windows.Forms.MouseEventArgs e)
+        {
+            if (e.Button == System.Windows.Forms.MouseButtons.Right)
+                _fpController?.NotifyRightMouseUp();
+        }
+
+        /// <summary>WinForms mouse coordinates are device pixels; walk-mode look
+        /// sensitivity is tuned for DIPs, so scale them down by the DPI factor.</summary>
+        private WpfPoint HostPointToDip(System.Windows.Forms.MouseEventArgs e)
+        {
+            var dpi = VisualTreeHelper.GetDpi(this);
+            return new WpfPoint(e.X / dpi.DpiScaleX, e.Y / dpi.DpiScaleY);
         }
 
         private sealed class CachedIfcModel

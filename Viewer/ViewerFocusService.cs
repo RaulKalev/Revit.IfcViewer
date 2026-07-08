@@ -32,12 +32,6 @@ namespace IfcViewer.Viewer
             _camera = camera ?? throw new ArgumentNullException(nameof(camera));
         }
 
-        public bool FocusByMesh(MeshGeometryModel3D mesh)
-        {
-            if (mesh?.Geometry == null) return false;
-            return FocusByWorldBounds(mesh.Geometry.Bound);
-        }
-
         public bool FocusByWorldBounds(BoundingBox bounds)
         {
             if (bounds.Maximum == bounds.Minimum) return false;

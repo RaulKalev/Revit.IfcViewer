@@ -231,6 +231,22 @@
                                 Margin="0,0,0,8"
                                 ValueChanged="FollowDistance_ValueChanged"/>
 
+                        <Separator Margin="0,4,0,12" Background="{DynamicResource BorderBrush}"/>
+
+                        <!-- ── Rendering ── -->
+                        <TextBlock Text="RENDERING"
+                                   FontSize="10" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource IconBrush}"
+                                   Margin="0,0,0,8"/>
+
+                        <CheckBox x:Name="SsaoCheckBox"
+                                  Content="Ambient occlusion (SSAO) — costs FPS"
+                                  Foreground="{DynamicResource ForegroundBrush}"
+                                  FontSize="11"
+                                  Margin="0,0,0,8"
+                                  Checked="Ssao_Changed"
+                                  Unchecked="Ssao_Changed"/>
+
                     </StackPanel>
                 </ScrollViewer>
 

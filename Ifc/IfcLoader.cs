@@ -1,4 +1,5 @@
 using HelixToolkit.Wpf.SharpDX;
+using IfcViewer.Viewer;
 using SharpDX;
 using System;
 using System.Collections.Concurrent;
@@ -29,10 +30,9 @@ namespace IfcViewer.Ifc
     ///   3. The storeReader loop is split: Phase 1 (serial, reads store) collects
     ///      raw byte blobs and extracts element properties; Phase 2 (Parallel.ForEach)
     ///      decodes+transforms in parallel; Phase 3 merges thread-local buckets.
-    ///   4. Each IFC product gets its own MeshGeometryModel3D so hit-testing
-    ///      can identify individual elements. ElementMap is returned in IfcModel.
-    ///   5. Helix scene objects are dispatched progressively via BeginInvoke so
-    ///      geometry appears in the viewport before all elements are built.
+    ///   4. Geometry is merged into one mesh per (colour, transparency) bucket so
+    ///      the whole model renders in a few dozen draw calls. Per-element identity
+    ///      (selection, hide, zoom) is preserved via ElementHandle vertex ranges.
     /// </summary>
     public static class IfcLoader
     {
@@ -99,7 +99,7 @@ namespace IfcViewer.Ifc
         /// <paramref name="onProgress"/> is called on the UI thread with status strings.
         /// Returns an <see cref="IfcModel"/> whose <c>SceneGroup</c> is ready to insert
         /// into the live Helix scene (on the UI thread).
-        /// Each IFC product gets its own MeshGeometryModel3D, enabling element selection.
+        /// Geometry is merged by colour; element selection works via vertex-range handles.
         /// </summary>
         public static Task<IfcModel> LoadAsync(string filePath,
                                                Dispatcher uiDispatcher,
@@ -136,8 +136,8 @@ namespace IfcViewer.Ifc
                 sw.Stop();
                 SessionLogger.Info($"IfcLoader: cache hit in {sw.ElapsedMilliseconds} ms ({cachedBuckets.Count} elements).");
                 Report($"Loaded from cache ({cachedBuckets.Count} elements).");
-                return BuildSceneProgressive(filePath, cachedBuckets, cachedInfos,
-                                             cachedBuckets.Count, uiDispatcher, Report);
+                return BuildSceneMerged(filePath, cachedBuckets, cachedInfos,
+                                        cachedBuckets.Count, uiDispatcher, Report);
             }
 
             // Ensure native geometry engine DLLs are findable before any xBIM call
@@ -486,8 +486,8 @@ namespace IfcViewer.Ifc
 
                     // Use mergedBuckets (keyed by product+colour) so each colour sub-shape
                     // gets its own mesh with the correct material.
-                    return BuildSceneProgressive(filePath, mergedBuckets, elementInfos,
-                                                 elementCount, uiDispatcher, Report);
+                    return BuildSceneMerged(filePath, mergedBuckets, elementInfos,
+                                            elementCount, uiDispatcher, Report);
 
 
                 }
@@ -499,13 +499,13 @@ namespace IfcViewer.Ifc
         }
 
         /// <summary>
-        /// Build the Helix scene progressively — dispatch each element as a separate
-        /// BeginInvoke so geometry appears in the viewport incrementally.
-        /// Creates one MeshGeometryModel3D per distinct (product, colour) pair so that
-        /// sub-shapes with different colours (e.g. glass vs frame) each keep their own
-        /// material while still mapping to the same element info for click-selection.
+        /// Build the Helix scene as one merged mesh per distinct (colour, transparency)
+        /// bucket instead of one mesh per element. A model with thousands of products
+        /// renders as a few dozen draw calls, which is what keeps the frame rate high.
+        /// Per-element identity (selection, hide, zoom) is preserved via ElementHandle
+        /// vertex ranges; hit-test octrees are built here on the background thread.
         /// </summary>
-        private static IfcModel BuildSceneProgressive(
+        private static IfcModel BuildSceneMerged(
             string filePath,
             Dictionary<(int productLabel, ColourKey colour), Bucket> elementBuckets,
             Dictionary<int, IfcElementInfo> elementInfos,
@@ -513,75 +513,53 @@ namespace IfcViewer.Ifc
             Dispatcher uiDispatcher,
             Action<string> report)
         {
-            var sceneGroup = uiDispatcher.Invoke(() => new GroupModel3D());
-            var allBounds  = new ConcurrentBag<BoundingBox>();
-            // ElementMap is populated from BeginInvoke lambdas (all on UI thread, serial).
-            var elementMap = new Dictionary<MeshGeometryModel3D, IfcElementInfo>();
+            var builder    = new MergedSceneBuilder();
+            var handleByLabel = new Dictionary<int, ElementHandle>();
             int triCount   = 0;
 
             foreach (var kv in elementBuckets)
             {
-                int    productLabel    = kv.Key.productLabel;
-                Bucket bucket          = kv.Value;
+                Bucket bucket = kv.Value;
                 if (bucket.Indices.Count == 0) continue;
 
                 triCount += bucket.Indices.Count / 3;
 
-                var capturedLabel  = productLabel;
-                var capturedBucket = bucket;
-
-                uiDispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+                if (!handleByLabel.TryGetValue(kv.Key.productLabel, out ElementHandle handle))
                 {
-                    var helixGeom = new MeshGeometry3D
-                    {
-                        Positions = new Vector3Collection(capturedBucket.Positions),
-                        Normals   = new Vector3Collection(capturedBucket.Normals),
-                        Indices   = new IntCollection(capturedBucket.Indices)
-                    };
+                    elementInfos.TryGetValue(kv.Key.productLabel, out IfcElementInfo info);
+                    handle = new ElementHandle { Info = info };
+                    handleByLabel[kv.Key.productLabel] = handle;
+                }
 
-                    var mat = new PhongMaterial
-                    {
-                        DiffuseColor      = capturedBucket.Colour.ToColor4(),
-                        AmbientColor      = new Color4(0.15f, 0.15f, 0.15f, 1f),
-                        SpecularColor     = new Color4(0.05f, 0.05f, 0.05f, 1f),
-                        SpecularShininess = 4f,
-                        ReflectiveColor   = new Color4(0f, 0f, 0f, 0f),
-                    };
-
-                    var mesh3d = new MeshGeometryModel3D
-                    {
-                        Geometry      = helixGeom,
-                        Material      = mat,
-                        IsTransparent = capturedBucket.IsTransparent,
-                    };
-
-                    sceneGroup.Children.Add(mesh3d);
-
-                    if (capturedBucket.Positions.Count > 0)
-                    {
-                        BoundingBox.FromPoints(capturedBucket.Positions.ToArray(), out BoundingBox b);
-                        allBounds.Add(b);
-                    }
-
-                    // Register mesh → element info for click-selection
-                    if (elementInfos.TryGetValue(capturedLabel, out IfcElementInfo info))
-                        elementMap[mesh3d] = info;
-                }));
+                builder.AddElement(handle, bucket.Colour.ToColor4(), bucket.IsTransparent,
+                                   bucket.Positions, bucket.Normals, bucket.Indices);
             }
 
-            // Wait for all BeginInvoke(Background) dispatches to complete.
-            // ContextIdle priority (3) is LOWER than Background (4), so this only
-            // executes after all queued Background callbacks have finished — ensuring
-            // both allBounds and elementMap are fully populated before we return.
-            uiDispatcher.Invoke(DispatcherPriority.ContextIdle, new Action(() => { }));
+            // Heavy part (buffer copies + octree build) stays off the UI thread.
+            List<MergedMeshInfo> merged = builder.BuildGeometries();
 
-            BoundingBox bounds = allBounds.Count > 0
-                ? allBounds.Aggregate(BoundingBox.Merge)
-                : new BoundingBox();
+            BoundingBox bounds = new BoundingBox();
+            bool hasBounds = false;
+            foreach (var mi in merged)
+            {
+                bounds = hasBounds ? BoundingBox.Merge(bounds, mi.Geometry.Bound) : mi.Geometry.Bound;
+                hasBounds = true;
+            }
+
+            var sceneGroup = uiDispatcher.Invoke(() =>
+            {
+                var group = new GroupModel3D();
+                foreach (var mi in merged)
+                    group.Children.Add(MergedSceneBuilder.CreateMeshNode(mi));
+                return group;
+            });
+
+            var handles = handleByLabel.Values.ToList();
 
             report($"Scene ready — {elementCount} elements, {triCount} triangles");
-            SessionLogger.Info($"IfcLoader: {triCount} triangles, {elementCount} elements — scene ready.");
-            return new IfcModel(filePath, sceneGroup, bounds, elementCount, triCount, elementMap);
+            SessionLogger.Info($"IfcLoader: {triCount} triangles, {elementCount} elements, " +
+                               $"{merged.Count} merged meshes — scene ready.");
+            return new IfcModel(filePath, sceneGroup, bounds, elementCount, triCount, handles);
         }
 
         // ── Processed geometry cache ──────────────────────────────────────────

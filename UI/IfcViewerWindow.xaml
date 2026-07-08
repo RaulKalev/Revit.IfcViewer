@@ -12,12 +12,25 @@
     Height="700"
     MinWidth="800"
     MinHeight="500"
-    AllowsTransparency="True"
-    Background="Transparent"
+    Background="#FF1F1F1F"
     WindowStyle="None"
     MouseMove="Window_MouseMove"
     Closed="Window_Closed"
     mc:Ignorable="av">
+
+    <!-- Borderless custom chrome WITHOUT AllowsTransparency. A layered
+         (per-pixel-alpha) window forces WPF through a full-window readback +
+         unsynchronized UpdateLayeredWindow copy every frame, which capped the
+         3D viewport at 10-15 fps and produced tearing. WindowChrome keeps the
+         borderless look and DWM-handled resize edges; DWM composition is
+         vsynced, so D3DImage presents without tearing. -->
+    <WindowChrome.WindowChrome>
+        <WindowChrome CaptionHeight="0"
+                      CornerRadius="0"
+                      GlassFrameThickness="0"
+                      ResizeBorderThickness="6"
+                      UseAeroCaptionButtons="False"/>
+    </WindowChrome.WindowChrome>
 
     <Window.Resources>
         <ResourceDictionary>
@@ -316,19 +329,26 @@
                                   Background="{DynamicResource BorderBrush}"
                                   ShowsPreview="False"/>
 
-                    <!-- Viewport host — Viewport3DX injected in code-behind after
-                         assembly resolver fires; no Helix types in XAML. -->
-                    <Grid Grid.Column="2" x:Name="ViewportContainer" ClipToBounds="True"
-                          Background="#FF1A1A1A">
+                    <!-- Viewport column. The swap-chain render surface is a child
+                         HWND that covers every WPF element in its region (airspace),
+                         so the banner and status live in strips above/below the 3D
+                         area instead of overlaying it. -->
+                    <Grid Grid.Column="2" Background="#FF1A1A1A">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
 
                         <!-- IFC file-change notification banner -->
                         <Border x:Name="ReloadBanner"
+                                Grid.Row="0"
                                 Visibility="Collapsed"
-                                HorizontalAlignment="Center" VerticalAlignment="Top"
+                                HorizontalAlignment="Center"
                                 Background="#CC1F1F1F"
                                 BorderBrush="#FF444444" BorderThickness="1"
-                                CornerRadius="4" Padding="10,6" Margin="0,8,0,0"
-                                Panel.ZIndex="20" IsHitTestVisible="True">
+                                CornerRadius="4" Padding="10,6" Margin="0,6,0,6"
+                                IsHitTestVisible="True">
                             <StackPanel Orientation="Horizontal">
                                 <materialDesign:PackIcon Kind="FileAlert" Width="16" Height="16"
                                                          Foreground="#FFAAAAAA"
@@ -349,17 +369,19 @@
                             </StackPanel>
                         </Border>
 
-                        <!-- Status overlay -->
-                        <Border HorizontalAlignment="Right"
-                                VerticalAlignment="Bottom"
-                                Background="#66000000"
-                                CornerRadius="4"
+                        <!-- Viewport host — Viewport3DX injected in code-behind after
+                             assembly resolver fires; no Helix types in XAML. -->
+                        <Grid Grid.Row="1" x:Name="ViewportContainer" ClipToBounds="True"
+                              Background="#FF1A1A1A"/>
+
+                        <!-- Status strip -->
+                        <Border Grid.Row="2"
+                                Background="#FF1A1A1A"
                                 Padding="6,2"
-                                Margin="0,0,6,6"
-                                IsHitTestVisible="False"
-                                Panel.ZIndex="10">
+                                IsHitTestVisible="False">
                             <TextBlock x:Name="StatusBar"
                                        Text="Initializing GPU viewport…"
+                                       HorizontalAlignment="Right"
                                        Foreground="#FF70BABC"
                                        FontSize="10"/>
                         </Border>

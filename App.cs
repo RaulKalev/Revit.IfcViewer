@@ -1,102 +1,58 @@
 using Autodesk.Revit.UI;
 using ricaun.Revit.UI;
 using System;
-using System.IO;
-using System.Reflection;
-using IfcViewer.Commands;
 
 namespace IfcViewer
 {
-    [AppLoader]
     public class App : IExternalApplication
     {
         private RibbonPanel _ribbonPanel;
 
-        // Folder next to IfcViewer.dll — all dependency DLLs live here.
-        private static string _assemblyDir;
-
         public Result OnStartup(UIControlledApplication application)
         {
-            // ── 1. Register assembly resolver FIRST, before anything Helix-related ──
-            // ricaun.AppLoader shadow-copies IfcViewer.dll (and the entire net8.0-windows
-            // subfolder) to a temp location.  Assembly.Location returns that temp path,
-            // which is exactly where our force-copied loose DLLs (xBIM, HelixToolkit.SharpDX.Core)
-            // also end up — so we just use Location directly.
-            _assemblyDir = Path.GetDirectoryName(typeof(App).Assembly.Location)
-                        ?? Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-            AppDomain.CurrentDomain.AssemblyResolve += OnAssemblyResolve;
-            SessionLogger.Info($"IfcViewer starting. Assembly dir: {_assemblyDir}");
+            // The DependencyLoader module initializer has already extracted the
+            // embedded dependency DLLs and hooked assembly resolution before any
+            // code in this assembly ran. This call is a no-op safety net.
+            DependencyLoader.EnsureInitialized();
+            SessionLogger.Info($"IfcViewer starting. Libs: {DependencyLoader.LibDir ?? "(loose files)"}");
 
-            // ── 2. Ribbon ──────────────────────────────────────────────────────────
-            string tabName = "RK Tools";
-            try { application.CreateRibbonTab(tabName); } catch { }
-
-            _ribbonPanel = application.CreateOrSelectPanel(tabName, "Tools");
-
-            _ribbonPanel.CreatePushButton<IfcViewerCommand>()
-                .SetLargeImage("pack://application:,,,/IfcViewer;component/Assets/IfcViewer.tiff")
-                .SetText("IFC\nViewer")
-                .SetToolTip("Launch the IFC Viewer")
-                .SetLongDescription("IfcViewer lets you load IFC files and compare them against your live Revit model in a GPU-accelerated 3D viewport.")
-                .SetContextualHelp("https://github.com/RaulKalev/Revit.IfcViewer");
+            try
+            {
+                CreateRibbon(application);
+            }
+            catch (Exception ex)
+            {
+                SessionLogger.Error("Failed to create IfcViewer ribbon.", ex);
+                return Result.Failed;
+            }
 
             SessionLogger.Info("IfcViewer ribbon loaded.");
             return Result.Succeeded;
         }
 
-        public Result OnShutdown(UIControlledApplication application)
+        // Kept separate from OnStartup so the JIT only needs the ricaun.Revit.UI
+        // assembly (resolved from the extracted libs) once this method is called —
+        // after DependencyLoader is guaranteed to be initialized.
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private void CreateRibbon(UIControlledApplication application)
         {
-            AppDomain.CurrentDomain.AssemblyResolve -= OnAssemblyResolve;
-            _ribbonPanel?.Remove();
-            return Result.Succeeded;
+            string tabName = "RK Tools";
+            try { application.CreateRibbonTab(tabName); } catch { }
+
+            _ribbonPanel = application.CreateOrSelectPanel(tabName, "Tools");
+
+            _ribbonPanel.CreatePushButton<Commands.IfcViewerCommand>()
+                .SetLargeImage("pack://application:,,,/IfcViewer;component/Assets/IfcViewer.tiff")
+                .SetText("IFC\nViewer")
+                .SetToolTip("Launch the IFC Viewer")
+                .SetLongDescription("IfcViewer lets you load IFC files and compare them against your live Revit model in a GPU-accelerated 3D viewport.")
+                .SetContextualHelp("https://github.com/RaulKalev/Revit.IfcViewer");
         }
 
-        /// <summary>
-        /// Probes the add-in folder for any DLL that satisfies the requested
-        /// assembly name. This handles Helix, SharpDX, and any future deps
-        /// that Revit's CLR host doesn't know about.
-        /// </summary>
-        private static Assembly OnAssemblyResolve(object sender, ResolveEventArgs args)
+        public Result OnShutdown(UIControlledApplication application)
         {
-            try
-            {
-                // args.Name is like "Xbim.Ifc, Version=5.1.0.0, ..."
-                var simpleName = new AssemblyName(args.Name).Name;
-
-                // 1. Already loaded? Return it to avoid duplicates.
-                foreach (var loaded in AppDomain.CurrentDomain.GetAssemblies())
-                {
-                    if (loaded.GetName().Name.Equals(simpleName, StringComparison.OrdinalIgnoreCase))
-                        return loaded;
-                }
-
-                // 2. Look for a matching DLL next to IfcViewer.dll (flat)
-                var candidate = Path.Combine(_assemblyDir, simpleName + ".dll");
-                if (File.Exists(candidate))
-                {
-                    SessionLogger.Info($"AssemblyResolve: loading '{simpleName}' from flat dir");
-                    return Assembly.LoadFrom(candidate);
-                }
-
-                // 3. Also probe one level of subdirectories (some NuGet packages use subfolders)
-                foreach (var subDir in Directory.GetDirectories(_assemblyDir))
-                {
-                    candidate = Path.Combine(subDir, simpleName + ".dll");
-                    if (File.Exists(candidate))
-                    {
-                        SessionLogger.Info($"AssemblyResolve: loading '{simpleName}' from subdir");
-                        return Assembly.LoadFrom(candidate);
-                    }
-                }
-
-                SessionLogger.Warn($"AssemblyResolve: '{simpleName}' not found in '{_assemblyDir}'");
-            }
-            catch (Exception ex)
-            {
-                SessionLogger.Error($"AssemblyResolve exception for '{args.Name}'", ex);
-            }
-
-            return null;
+            _ribbonPanel?.Remove();
+            return Result.Succeeded;
         }
     }
 }

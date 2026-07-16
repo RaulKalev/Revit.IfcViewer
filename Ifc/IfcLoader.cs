@@ -36,12 +36,6 @@ namespace IfcViewer.Ifc
     /// </summary>
     public static class IfcLoader
     {
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern bool SetDllDirectory(string lpPathName);
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern IntPtr AddDllDirectory(string lpPathName);
-
         // ── Fallback colours by IFC product type ─────────────────────────────
         private static readonly XbimColour ColWall    = new XbimColour("Wall",   0.75f, 0.72f, 0.68f, 1f);
         private static readonly XbimColour ColSlab    = new XbimColour("Slab",   0.60f, 0.60f, 0.58f, 1f);
@@ -140,16 +134,8 @@ namespace IfcViewer.Ifc
                                         cachedBuckets.Count, uiDispatcher, Report);
             }
 
-            // Ensure native geometry engine DLLs are findable before any xBIM call
-            string assemblyDir = Path.GetDirectoryName(typeof(IfcLoader).Assembly.Location);
-            if (!string.IsNullOrEmpty(assemblyDir))
-            {
-                SetDllDirectory(assemblyDir);
-                AddDllDirectory(assemblyDir);
-                string currentPath = Environment.GetEnvironmentVariable("PATH") ?? "";
-                if (currentPath.IndexOf(assemblyDir, StringComparison.OrdinalIgnoreCase) < 0)
-                    Environment.SetEnvironmentVariable("PATH", assemblyDir + ";" + currentPath);
-            }
+            // Native geometry engine search paths are configured once by
+            // DependencyLoader (module initializer) — nothing to do here.
 
             // ── Boost thread pool so xBIM's internal Parallel.ForEach
             //    gets worker threads without the default ramp-up delay
@@ -435,24 +421,33 @@ namespace IfcViewer.Ifc
                         wallLayerRelationGroups);
 
                     // Propagate wall-merge removals and opening cuts back to mergedBuckets.
-                    var obsoleteKeys = new List<(int, ColourKey)>();
+                    // Index merged keys by product label first — a linear scan of all
+                    // merged keys per product is O(n²) on large models.
+                    var mergedKeysByLabel = new Dictionary<int, List<(int, ColourKey)>>();
+                    foreach (var mk in mergedBuckets.Keys)
+                    {
+                        if (!mergedKeysByLabel.TryGetValue(mk.Item1, out var keys))
+                            mergedKeysByLabel[mk.Item1] = keys = new List<(int, ColourKey)>();
+                        keys.Add(mk);
+                    }
+
+                    var obsoleteKeys = new HashSet<(int, ColourKey)>();
                     var modifiedLabels = new List<int>();
 
-                    // 1. Find completely deleted products (e.g. wall absorbed in a merge)
-                    foreach (var mk in mergedBuckets.Keys)
-                        if (!buckets.ContainsKey(mk.Item1))
-                            obsoleteKeys.Add(mk);
+                    // 1. Completely deleted products (e.g. wall absorbed in a merge)
+                    foreach (var kv in mergedKeysByLabel)
+                        if (!buckets.ContainsKey(kv.Key))
+                            obsoleteKeys.UnionWith(kv.Value);
 
-                    // 2. Find modified products (e.g. wall cut by an opening or merged into).
+                    // 2. Modified products (e.g. wall cut by an opening or merged into).
                     // If a product's geometry changed, its vertex count will differ.
                     foreach (var kv in buckets)
                     {
                         if (originalVerts.TryGetValue(kv.Key, out int orig) && orig != kv.Value.Positions.Count)
                         {
                             modifiedLabels.Add(kv.Key);
-                            foreach (var mk in mergedBuckets.Keys)
-                                if (mk.Item1 == kv.Key && !obsoleteKeys.Contains(mk))
-                                    obsoleteKeys.Add(mk);
+                            if (mergedKeysByLabel.TryGetValue(kv.Key, out var keys))
+                                obsoleteKeys.UnionWith(keys);
                         }
                     }
 
@@ -673,19 +668,11 @@ namespace IfcViewer.Ifc
                         var bucket = new Bucket(transparent, colour);
 
                         int posCount = br.ReadInt32();
-                        bucket.Positions.Capacity = posCount;
-                        bucket.Normals.Capacity   = posCount;
-                        for (int i = 0; i < posCount; i++)
-                            bucket.Positions.Add(new Vector3(
-                                br.ReadSingle(), br.ReadSingle(), br.ReadSingle()));
-                        for (int i = 0; i < posCount; i++)
-                            bucket.Normals.Add(new Vector3(
-                                br.ReadSingle(), br.ReadSingle(), br.ReadSingle()));
+                        bucket.Positions.AddRange(ReadVector3Block(br, posCount));
+                        bucket.Normals.AddRange(ReadVector3Block(br, posCount));
 
                         int idxCount = br.ReadInt32();
-                        bucket.Indices.Capacity = idxCount;
-                        for (int i = 0; i < idxCount; i++)
-                            bucket.Indices.Add(br.ReadInt32());
+                        bucket.Indices.AddRange(ReadInt32Block(br, idxCount));
 
                         buckets[(label, colour)] = bucket;
                     }
@@ -778,14 +765,11 @@ namespace IfcViewer.Ifc
                             bw.Write(kv.Value.IsTransparent);
 
                             bw.Write(kv.Value.Positions.Count);
-                            foreach (var p in kv.Value.Positions)
-                            { bw.Write(p.X); bw.Write(p.Y); bw.Write(p.Z); }
-                            foreach (var n in kv.Value.Normals)
-                            { bw.Write(n.X); bw.Write(n.Y); bw.Write(n.Z); }
+                            WriteVector3Block(bw, kv.Value.Positions);
+                            WriteVector3Block(bw, kv.Value.Normals);
 
                             bw.Write(kv.Value.Indices.Count);
-                            foreach (int idx in kv.Value.Indices)
-                                bw.Write(idx);
+                            WriteInt32Block(bw, kv.Value.Indices);
                         }
 
                         // ── Element infos ─────────────────────────────────
@@ -821,6 +805,51 @@ namespace IfcViewer.Ifc
                     SessionLogger.Warn($"IfcLoader: cache write failed: {ex.Message}");
                 }
             });
+        }
+
+        // ── Bulk binary I/O ──────────────────────────────────────────────────
+        // Vector3 is a blittable 12-byte struct and BinaryWriter writes floats
+        // little-endian, so a raw memory copy produces byte-identical output to
+        // the old per-float loops (format unchanged) at a fraction of the cost.
+
+        private static unsafe Vector3[] ReadVector3Block(BinaryReader br, int count)
+        {
+            var arr = new Vector3[count];
+            if (count == 0) return arr;
+            byte[] bytes = br.ReadBytes(count * 12);
+            if (bytes.Length != count * 12) throw new EndOfStreamException();
+            fixed (Vector3* dst = arr)
+                Marshal.Copy(bytes, 0, (IntPtr)dst, bytes.Length);
+            return arr;
+        }
+
+        private static unsafe void WriteVector3Block(BinaryWriter bw, List<Vector3> list)
+        {
+            if (list.Count == 0) return;
+            Vector3[] arr = list.ToArray();
+            byte[] bytes = new byte[arr.Length * 12];
+            fixed (Vector3* src = arr)
+                Marshal.Copy((IntPtr)src, bytes, 0, bytes.Length);
+            bw.Write(bytes);
+        }
+
+        private static int[] ReadInt32Block(BinaryReader br, int count)
+        {
+            var arr = new int[count];
+            if (count == 0) return arr;
+            byte[] bytes = br.ReadBytes(count * 4);
+            if (bytes.Length != count * 4) throw new EndOfStreamException();
+            Buffer.BlockCopy(bytes, 0, arr, 0, bytes.Length);
+            return arr;
+        }
+
+        private static void WriteInt32Block(BinaryWriter bw, List<int> list)
+        {
+            if (list.Count == 0) return;
+            int[] arr = list.ToArray();
+            byte[] bytes = new byte[arr.Length * 4];
+            Buffer.BlockCopy(arr, 0, bytes, 0, bytes.Length);
+            bw.Write(bytes);
         }
 
         // ── Element property extraction ──────────────────────────────────────

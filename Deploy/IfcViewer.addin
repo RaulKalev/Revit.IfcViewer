@@ -2,7 +2,9 @@
 <RevitAddIns>
   <AddIn Type="Application">
     <Name>IfcViewer</Name>
-    <Assembly>C:\Users\mibil\OneDrive\Desktop\DevDlls\IfcViewer\2026\net8.0-windows\IfcViewer.dll</Assembly>
+    <!-- Relative to this manifest: %APPDATA%\Autodesk\Revit\Addins\<version>\IfcViewer\IfcViewer.dll
+         IfcViewer.dll is fully self-contained — no other files are needed. -->
+    <Assembly>IfcViewer\IfcViewer.dll</Assembly>
     <AddInId>B3D5F7A9-2C4E-4B6D-8F1A-3E5C7B9D1F3A</AddInId>
     <FullClassName>IfcViewer.App</FullClassName>
     <VendorId>RKTools</VendorId>

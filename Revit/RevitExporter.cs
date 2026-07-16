@@ -18,6 +18,11 @@ namespace IfcViewer.Revit
     /// updates via <see cref="ExportIncremental"/> re-tessellate only dirty elements
     /// and re-merge them with the retained buckets of unchanged elements.
     ///
+    /// Linked Revit models visible in the view are exported too (full exports only):
+    /// their elements render, pick, and show properties like host elements, but they
+    /// are static — incremental syncs carry the previous linked geometry over
+    /// unchanged rather than re-tessellating it.
+    ///
     /// Threading: <see cref="Export"/> / <see cref="ExportIncremental"/> must be called
     /// on the Revit API thread. Helix WPF objects are marshalled to
     /// <paramref name="uiDispatcher"/>.
@@ -45,7 +50,8 @@ namespace IfcViewer.Revit
             sw.Stop();
             SessionLogger.Info(
                 $"RevitExporter: done in {sw.ElapsedMilliseconds} ms. " +
-                $"Elements={context.ElementBuckets.Count}  Faces={context.FaceCount}");
+                $"Elements={context.ElementBuckets.Count}  Linked={context.LinkedBuckets.Count}  " +
+                $"Faces={context.FaceCount}");
 
             return uiDispatcher.Invoke(() => BuildScene(context, view.Name));
         }
@@ -93,7 +99,7 @@ namespace IfcViewer.Revit
         {
             var buckets = new Dictionary<ElementId, ElementBucket>(ctx.ElementBuckets);
             var infos   = new Dictionary<ElementId, RevitElementInfo>(ctx.ElementInfos);
-            return BuildMergedModel(viewName, buckets, infos);
+            return BuildMergedModel(viewName, buckets, infos, ctx.LinkedBuckets, ctx.LinkedInfos);
         }
 
         // ── Incremental scene patcher (UI thread) ─────────────────────────────
@@ -129,7 +135,10 @@ namespace IfcViewer.Revit
                     infos[kv.Key] = info;
             }
 
-            return BuildMergedModel(previous.DisplayName, buckets, infos);
+            // Linked models are static: incremental exports skip them entirely, so
+            // the previous export's linked geometry is carried over unchanged.
+            return BuildMergedModel(previous.DisplayName, buckets, infos,
+                                    previous.LinkedBuckets, previous.LinkedInfos);
         }
 
         // ── Shared merged-scene factory (UI thread) ───────────────────────────
@@ -137,7 +146,9 @@ namespace IfcViewer.Revit
         private static RevitModel BuildMergedModel(
             string displayName,
             Dictionary<ElementId, ElementBucket>    buckets,
-            Dictionary<ElementId, RevitElementInfo> infos)
+            Dictionary<ElementId, RevitElementInfo> infos,
+            Dictionary<LinkedElementKey, ElementBucket>    linkedBuckets,
+            Dictionary<LinkedElementKey, RevitElementInfo> linkedInfos)
         {
             var builder = new MergedSceneBuilder();
             var handles = new Dictionary<ElementId, ElementHandle>();
@@ -157,6 +168,24 @@ namespace IfcViewer.Revit
                 triCount += bucket.Indices.Count / 3;
             }
 
+            // Linked-model elements render and pick like host elements, but their
+            // handles stay out of the ElementId-keyed map (follow-selection and
+            // incremental sync are host-only; linked ids could collide with host ids).
+            int linkedCount = 0;
+            foreach (var kv in linkedBuckets)
+            {
+                var bucket = kv.Value;
+                if (bucket.Indices.Count == 0) continue;
+
+                linkedInfos.TryGetValue(kv.Key, out RevitElementInfo info);
+                var handle = new ElementHandle { Info = info };
+
+                builder.AddElement(handle, bucket.Colour, bucket.Colour.Alpha < 0.99f,
+                                   bucket.Positions, bucket.Normals, bucket.Indices);
+                triCount += bucket.Indices.Count / 3;
+                linkedCount++;
+            }
+
             List<MergedMeshInfo> merged = builder.BuildGeometries();
 
             var sceneGroup = new GroupModel3D();
@@ -170,10 +199,11 @@ namespace IfcViewer.Revit
             }
 
             SessionLogger.Info(
-                $"RevitExporter: {triCount} triangles, {handles.Count} elements, " +
-                $"{merged.Count} merged meshes — scene ready.");
+                $"RevitExporter: {triCount} triangles, {handles.Count} elements " +
+                $"(+{linkedCount} linked), {merged.Count} merged meshes — scene ready.");
             return new RevitModel(displayName, sceneGroup, bounds,
-                handles.Count, triCount, handles, infos, buckets);
+                handles.Count + linkedCount, triCount, handles, infos, buckets,
+                linkedBuckets, linkedInfos);
         }
     }
 
@@ -186,6 +216,10 @@ namespace IfcViewer.Revit
             = new Dictionary<ElementId, ElementBucket>();
         public readonly Dictionary<ElementId, RevitElementInfo>  ElementInfos
             = new Dictionary<ElementId, RevitElementInfo>();
+        public readonly Dictionary<LinkedElementKey, ElementBucket>    LinkedBuckets
+            = new Dictionary<LinkedElementKey, ElementBucket>();
+        public readonly Dictionary<LinkedElementKey, RevitElementInfo> LinkedInfos
+            = new Dictionary<LinkedElementKey, RevitElementInfo>();
         public int FaceCount { get; private set; }
 
         // ── Per-element state ────────────────────────────────────────────────
@@ -195,6 +229,18 @@ namespace IfcViewer.Revit
         private Color4    _currentColor     = new Color4(0.7f, 0.7f, 0.7f, 1f);
         private bool      _skipElement;
         private ElementId _currentElementId = ElementId.InvalidElementId;
+
+        // ── Linked-model state ───────────────────────────────────────────────
+        // Element callbacks inside OnLinkBegin/OnLinkEnd carry ids from the LINKED
+        // document, so they must be resolved against it — and kept in separate
+        // buckets because linked ids can collide with host ids. Each link traversal
+        // gets a unique visit number so the same document placed as several link
+        // instances (each with its own transform) stays distinct.
+        private readonly Stack<Document> _linkDocStack   = new Stack<Document>();
+        private readonly Stack<int>      _linkVisitStack = new Stack<int>();
+        private int              _linkVisitCounter;
+        private LinkedElementKey _currentLinkedKey;
+        private bool InLink => _linkDocStack.Count > 0;
 
         private static readonly HashSet<BuiltInCategory> SkippedCategories
             = new HashSet<BuiltInCategory>
@@ -235,6 +281,9 @@ namespace IfcViewer.Revit
             _skipElement      = false;
             _currentElementId = elementId;
 
+            if (InLink)
+                return OnLinkedElementBegin(elementId);
+
             // Incremental filter: skip elements not in the dirty set
             if (_filterIds != null && !_filterIds.Contains(elementId))
             {
@@ -245,23 +294,54 @@ namespace IfcViewer.Revit
             Element elem = _doc.GetElement(elementId);
             if (elem == null) { _skipElement = true; return RenderNodeAction.Skip; }
 
-            if (elem.Category != null)
-            {
-                try
-                {
-                    var bic = (BuiltInCategory)(int)elem.Category.Id.Value;
-                    if (SkippedCategories.Contains(bic))
-                    { _skipElement = true; return RenderNodeAction.Skip; }
-                }
-                catch { /* non-built-in category — proceed */ }
-            }
+            if (IsSkippedCategory(elem)) { _skipElement = true; return RenderNodeAction.Skip; }
 
             _currentColor = CategoryToColor(elem);
 
             // Extract element properties for the selection panel.
-            ElementInfos[elementId] = ExtractElementInfo(elem, elementId);
+            ElementInfos[elementId] = ExtractElementInfo(elem, elementId, _doc);
 
             return RenderNodeAction.Proceed;
+        }
+
+        private RenderNodeAction OnLinkedElementBegin(ElementId elementId)
+        {
+            // Linked models are static in the viewer: exported on full syncs only,
+            // carried over unchanged through incremental patches — so skip them
+            // entirely when an incremental dirty-set filter is active.
+            Document linkDoc = _linkDocStack.Peek();
+            if (_filterIds != null || linkDoc == null)
+            { _skipElement = true; return RenderNodeAction.Skip; }
+
+            Element elem = linkDoc.GetElement(elementId);
+            if (elem == null) { _skipElement = true; return RenderNodeAction.Skip; }
+
+            if (IsSkippedCategory(elem)) { _skipElement = true; return RenderNodeAction.Skip; }
+
+            _currentColor     = CategoryToColor(elem);
+            _currentLinkedKey = new LinkedElementKey(_linkVisitStack.Peek(), elementId.Value);
+
+            var info = ExtractElementInfo(elem, elementId, linkDoc);
+            try
+            {
+                info.PropertySets["Linked Model"] = new Dictionary<string, string>
+                { ["Source"] = linkDoc.Title };
+            }
+            catch { /* provenance is best-effort */ }
+            LinkedInfos[_currentLinkedKey] = info;
+
+            return RenderNodeAction.Proceed;
+        }
+
+        private static bool IsSkippedCategory(Element elem)
+        {
+            if (elem.Category == null) return false;
+            try
+            {
+                var bic = (BuiltInCategory)(int)elem.Category.Id.Value;
+                return SkippedCategories.Contains(bic);
+            }
+            catch { return false; /* non-built-in category — proceed */ }
         }
 
         public void OnElementEnd(ElementId elementId) { _skipElement = false; }
@@ -282,12 +362,21 @@ namespace IfcViewer.Revit
         public RenderNodeAction OnLinkBegin(LinkNode node)
         {
             _transformStack.Push(CurrentTransform.Multiply(node.GetTransform()));
+            Document linkDoc = null;
+            try { linkDoc = node.GetDocument(); } catch { /* unloaded link */ }
+            _linkDocStack.Push(linkDoc);
+            _linkVisitStack.Push(++_linkVisitCounter);
             return RenderNodeAction.Proceed;
         }
 
         public void OnLinkEnd(LinkNode node)
         {
             if (_transformStack.Count > 1) _transformStack.Pop();
+            if (_linkDocStack.Count > 0)
+            {
+                _linkDocStack.Pop();
+                _linkVisitStack.Pop();
+            }
         }
 
         // ── Face / material ───────────────────────────────────────────────────
@@ -318,7 +407,16 @@ namespace IfcViewer.Revit
 
             Transform xform = CurrentTransform;
 
-            if (!ElementBuckets.TryGetValue(_currentElementId, out ElementBucket bucket))
+            ElementBucket bucket;
+            if (InLink)
+            {
+                if (!LinkedBuckets.TryGetValue(_currentLinkedKey, out bucket))
+                {
+                    bucket = new ElementBucket { Colour = _currentColor };
+                    LinkedBuckets[_currentLinkedKey] = bucket;
+                }
+            }
+            else if (!ElementBuckets.TryGetValue(_currentElementId, out bucket))
             {
                 bucket = new ElementBucket { Colour = _currentColor };
                 ElementBuckets[_currentElementId] = bucket;
@@ -439,7 +537,7 @@ namespace IfcViewer.Revit
             return s.ToLowerInvariant(); // e.g. "identity-data"
         }
 
-        private RevitElementInfo ExtractElementInfo(Element elem, ElementId elementId)
+        private static RevitElementInfo ExtractElementInfo(Element elem, ElementId elementId, Document doc)
         {
             var info = new RevitElementInfo
             {
@@ -456,7 +554,7 @@ namespace IfcViewer.Revit
 
                 var typeId = elem.GetTypeId();
                 if (typeId != null && typeId != ElementId.InvalidElementId)
-                    info.TypeName = _doc.GetElement(typeId)?.Name ?? "";
+                    info.TypeName = doc.GetElement(typeId)?.Name ?? "";
             }
             catch { /* non-critical */ }
 
@@ -486,7 +584,7 @@ namespace IfcViewer.Revit
                                     value = param.AsDouble().ToString("G6");
                                     break;
                                 case StorageType.ElementId:
-                                    var refEl = _doc.GetElement(param.AsElementId());
+                                    var refEl = doc.GetElement(param.AsElementId());
                                     value = refEl?.Name ?? param.AsElementId()?.ToString();
                                     break;
                             }
@@ -563,7 +661,7 @@ namespace IfcViewer.Revit
         }
     }
 
-    // ── Supporting type ───────────────────────────────────────────────────────
+    // ── Supporting types ──────────────────────────────────────────────────────
 
     internal sealed class ElementBucket
     {
@@ -571,5 +669,30 @@ namespace IfcViewer.Revit
         public readonly List<Vector3> Positions = new List<Vector3>();
         public readonly List<Vector3> Normals   = new List<Vector3>();
         public readonly List<int>     Indices   = new List<int>();
+    }
+
+    /// <summary>
+    /// Identity of one element inside a linked Revit model: the link-traversal
+    /// number (unique per link instance per export) plus the element's id in the
+    /// linked document. Linked ids can collide with host ids, so linked elements
+    /// are never keyed by bare <see cref="ElementId"/>.
+    /// </summary>
+    internal readonly struct LinkedElementKey : IEquatable<LinkedElementKey>
+    {
+        public readonly int  LinkVisit;
+        public readonly long ElementId;
+
+        public LinkedElementKey(int linkVisit, long elementId)
+        {
+            LinkVisit = linkVisit;
+            ElementId = elementId;
+        }
+
+        public bool Equals(LinkedElementKey other)
+            => LinkVisit == other.LinkVisit && ElementId == other.ElementId;
+        public override bool Equals(object obj)
+            => obj is LinkedElementKey other && Equals(other);
+        public override int GetHashCode()
+            => (LinkVisit * 397) ^ ElementId.GetHashCode();
     }
 }

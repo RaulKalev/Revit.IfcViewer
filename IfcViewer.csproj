@@ -42,8 +42,10 @@
   <ItemGroup>
     <Compile Remove="IfcCore\**" />
     <Compile Remove="IfcCore.Tests\**" />
+    <Compile Remove="Tests\**" />
     <None Remove="IfcCore\**" />
     <None Remove="IfcCore.Tests\**" />
+    <None Remove="Tests\**" />
   </ItemGroup>
 
   <ItemGroup>

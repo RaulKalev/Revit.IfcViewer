@@ -48,20 +48,35 @@ namespace IfcViewer.Revit
         /// </summary>
         internal Dictionary<ElementId, ElementBucket> Buckets { get; }
 
+        /// <summary>
+        /// Geometry from linked Revit models visible in the exported view, keyed by
+        /// (link traversal, linked ElementId) — linked ids can collide with host ids,
+        /// so they are kept out of <see cref="Buckets"/>. Linked geometry is exported
+        /// on full syncs only and carried over unchanged through incremental patches.
+        /// </summary>
+        internal Dictionary<LinkedElementKey, ElementBucket> LinkedBuckets { get; }
+
+        /// <summary>Element properties for linked elements, parallel to <see cref="LinkedBuckets"/>.</summary>
+        internal Dictionary<LinkedElementKey, RevitElementInfo> LinkedInfos { get; }
+
         internal RevitModel(string displayName, GroupModel3D sceneGroup,
                             BoundingBox bounds, int meshCount, int triangleCount,
                             IReadOnlyDictionary<ElementId, ElementHandle> handles,
                             IReadOnlyDictionary<ElementId, RevitElementInfo> elementInfos,
-                            Dictionary<ElementId, ElementBucket> buckets)
+                            Dictionary<ElementId, ElementBucket> buckets,
+                            Dictionary<LinkedElementKey, ElementBucket> linkedBuckets,
+                            Dictionary<LinkedElementKey, RevitElementInfo> linkedInfos)
         {
             DisplayName   = displayName;
             SceneGroup    = sceneGroup;
             Bounds        = bounds;
             MeshCount     = meshCount;
             TriangleCount = triangleCount;
-            Handles       = handles      ?? new Dictionary<ElementId, ElementHandle>();
-            ElementInfos  = elementInfos ?? new Dictionary<ElementId, RevitElementInfo>();
-            Buckets       = buckets      ?? new Dictionary<ElementId, ElementBucket>();
+            Handles       = handles       ?? new Dictionary<ElementId, ElementHandle>();
+            ElementInfos  = elementInfos  ?? new Dictionary<ElementId, RevitElementInfo>();
+            Buckets       = buckets       ?? new Dictionary<ElementId, ElementBucket>();
+            LinkedBuckets = linkedBuckets ?? new Dictionary<LinkedElementKey, ElementBucket>();
+            LinkedInfos   = linkedInfos   ?? new Dictionary<LinkedElementKey, RevitElementInfo>();
         }
 
         public override string ToString() => DisplayName;
